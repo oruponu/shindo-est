@@ -1,0 +1,11 @@
+shindo-est
+Copyright (c) 2026 oruponu
+The code is licensed under the MIT License (see LICENSE).
+
+This repository also contains data from the following sources.
+
+Slab2 (data/slab2/)
+  Hayes, G., 2018, Slab2 - A Comprehensive Subduction Zone Geometry Model:
+  U.S. Geological Survey data release, https://doi.org/10.5066/F7PV6JNV
+  Credit: U.S. Geological Survey. The data are in the U.S. public domain.
+  The files were converted and cropped; see data/slab2/SOURCE.md.

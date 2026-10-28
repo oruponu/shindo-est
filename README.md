@@ -8,4 +8,4 @@ shindo-est predicts the JMA instrumental seismic intensity at given sites from a
 
 ## License
 
-The code is licensed under the MIT License.
+The code is licensed under the MIT License. Data sources and their terms are listed in [NOTICE](NOTICE).
