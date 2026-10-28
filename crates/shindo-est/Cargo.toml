@@ -7,3 +7,14 @@ publish = false
 
 [dependencies]
 libm = "0.2.16"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# A fused multiply-add rounds once instead of twice, so it changes results.
+# Predictions must match LightGBM and stay identical across platforms and
+# languages, so arithmetic is written out as plain multiplications and additions.
+suboptimal_flops = "allow"
