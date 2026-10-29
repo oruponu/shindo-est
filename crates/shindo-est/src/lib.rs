@@ -2,3 +2,4 @@
 
 pub mod geodesy;
 pub mod input;
+pub mod slab;
