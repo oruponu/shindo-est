@@ -1,11 +1,19 @@
-//! Slab2 depth grids of the subducting Pacific plate.
+//! Slab2 depth grids of the subducting Pacific plate and the slab features
+//! derived from them.
 
 use std::fmt;
 
+use crate::input::Hypocenter;
+
 /// Spacing of the Slab2 grids in degrees.
 const SPACING: f64 = 0.05;
-/// Earth radius in km used for distances on the grids.
+/// Earth radius in km used for distances on the grids and along paths.
 const EARTH_RADIUS: f64 = 6371.0;
+/// Latitude in degrees from which the Kuril grid is used instead of the
+/// Izu-Bonin grid.
+const BOUNDARY_LATITUDE: f64 = 35.0;
+/// Number of equal segments of a path whose midpoints are tested.
+const PATH_SAMPLES: u32 = 60;
 /// Largest number of grid nodes accepted. The Kuril grid in `data/slab2` has about 155,000.
 const MAX_NODES: f64 = 4_000_000.0;
 /// Largest distance in nodes accepted between a point and its grid node.
@@ -234,6 +242,97 @@ impl SlabGrid {
             + at(i, j + 1) * (1.0 - wy) * wx
             + at(i + 1, j + 1) * wy * wx
     }
+}
+
+/// The Pacific slab under Japan, from the Kuril and Izu-Bonin Slab2 grids.
+#[derive(Clone, Debug)]
+pub struct SlabGeometry {
+    kuril: SlabGrid,
+    izu_bonin: SlabGrid,
+}
+
+impl SlabGeometry {
+    /// Combines the Kuril grid, used from 35 degrees north, with the Izu-Bonin
+    /// grid, used south of it.
+    #[must_use]
+    pub fn new(kuril: SlabGrid, izu_bonin: SlabGrid) -> Self {
+        Self { kuril, izu_bonin }
+    }
+
+    /// Returns the depth in km of the Pacific slab top under a point in
+    /// degrees, or NaN where the grid has no value.
+    #[must_use]
+    pub fn pacific_top_depth(&self, latitude: f64, longitude: f64) -> f64 {
+        self.pacific(latitude).sample(latitude, longitude).top_depth
+    }
+
+    /// Returns the hypocenter depth minus the Pacific slab top depth under a
+    /// site, in km, or NaN when either depth is unknown.
+    #[must_use]
+    pub fn updip_depth_difference(
+        &self,
+        hypocenter: &Hypocenter,
+        latitude: f64,
+        longitude: f64,
+    ) -> f64 {
+        hypocenter.depth - self.pacific_top_depth(latitude, longitude)
+    }
+
+    /// Returns the fraction, from 0 to 1, of the straight path from the
+    /// hypocenter to a site on the surface that lies inside the Pacific slab.
+    ///
+    /// The path is split into 60 equal segments, and a segment counts when its
+    /// midpoint is between the slab top and bottom, measured perpendicular to
+    /// the slab. Midpoints without slab values and an unknown hypocenter depth
+    /// count as outside.
+    #[must_use]
+    pub fn pacific_path_fraction(
+        &self,
+        hypocenter: &Hypocenter,
+        latitude: f64,
+        longitude: f64,
+    ) -> f64 {
+        let start = cartesian(hypocenter.latitude, hypocenter.longitude, hypocenter.depth);
+        let end = cartesian(latitude, longitude, 0.0);
+        let mut inside = 0_u32;
+        for k in 0..PATH_SAMPLES {
+            let t = (f64::from(k) + 0.5) / f64::from(PATH_SAMPLES);
+            let [x, y, z]: [f64; 3] =
+                std::array::from_fn(|axis| start[axis] + t * (end[axis] - start[axis]));
+            let radius = (x * x + y * y + z * z).sqrt();
+            let point_latitude = libm::asin(z / radius).to_degrees();
+            let point_longitude = libm::atan2(y, x).to_degrees();
+            let sample = self
+                .pacific(point_latitude)
+                .sample(point_latitude, point_longitude);
+            let perpendicular = (EARTH_RADIUS - radius - sample.top_depth) * sample.cos_dip;
+            // Range checks are false for NaN, so points without values count as outside.
+            if (0.0..=sample.thickness).contains(&perpendicular) {
+                inside += 1;
+            }
+        }
+        f64::from(inside) / f64::from(PATH_SAMPLES)
+    }
+
+    fn pacific(&self, latitude: f64) -> &SlabGrid {
+        if latitude >= BOUNDARY_LATITUDE {
+            &self.kuril
+        } else {
+            &self.izu_bonin
+        }
+    }
+}
+
+/// Returns the Earth-centered coordinates in km of a point at a depth in km
+/// below the surface of a sphere with radius `EARTH_RADIUS`.
+fn cartesian(latitude: f64, longitude: f64, depth: f64) -> [f64; 3] {
+    let radius = EARTH_RADIUS - depth;
+    let (latitude, longitude) = (latitude.to_radians(), longitude.to_radians());
+    [
+        radius * libm::cos(latitude) * libm::cos(longitude),
+        radius * libm::cos(latitude) * libm::sin(longitude),
+        radius * libm::sin(latitude),
+    ]
 }
 
 fn parse_point(line: &str, line_number: usize) -> Result<Point, SlabError> {
@@ -649,5 +748,171 @@ mod tests {
             .sample(40.0, 144.0)
             .top_depth;
         assert!(depth.is_finite(), "{depth}");
+    }
+
+    fn hypocenter(latitude: f64, longitude: f64, depth: f64) -> Hypocenter {
+        Hypocenter {
+            latitude,
+            longitude,
+            depth,
+            magnitude: 6.0,
+        }
+    }
+
+    // Kuril grid with its top at 300 km from 35 degrees north, and Izu-Bonin
+    // grid with its top at 250 km up to 34.95 degrees north.
+    fn geometry() -> SlabGeometry {
+        SlabGeometry::new(
+            test_support::flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            test_support::flat(32.0, 34.95, 138.0, 142.0, 250.0, 50.0),
+        )
+    }
+
+    #[test]
+    fn top_depth_uses_kuril_north_of_35_and_izu_south() {
+        let geometry = geometry();
+
+        assert_close(geometry.pacific_top_depth(35.0, 140.0), 300.0, 1e-9);
+        assert_close(geometry.pacific_top_depth(34.9, 140.0), 250.0, 1e-9);
+        let between = geometry.pacific_top_depth(34.97, 140.0);
+        assert!(between.is_nan(), "{between}");
+    }
+
+    #[test]
+    fn updip_is_hypocenter_depth_minus_top() {
+        let geometry = geometry();
+        let deep = hypocenter(36.5, 140.0, 400.0);
+        let shallow = hypocenter(36.5, 140.0, 200.0);
+
+        assert_close(
+            geometry.updip_depth_difference(&deep, 37.0, 141.0),
+            100.0,
+            1e-9,
+        );
+        assert_close(
+            geometry.updip_depth_difference(&shallow, 37.0, 141.0),
+            -100.0,
+            1e-9,
+        );
+        // The top is taken under the site, here on the Izu-Bonin grid.
+        assert_close(
+            geometry.updip_depth_difference(&deep, 34.9, 140.0),
+            150.0,
+            1e-9,
+        );
+        let outside = geometry.updip_depth_difference(&deep, 40.0, 141.0);
+        assert!(outside.is_nan(), "{outside}");
+    }
+
+    #[test]
+    fn vertical_path_through_flat_slab() {
+        // The slab is 300 to 350 km deep. Going up from 320 km, the path is in
+        // it for its first 1/16, which holds the midpoints of 4 of the 60
+        // segments. From 330 km it is the first 1/11: 5 midpoints but 6 segment
+        // starts. From 380 km it is from 3/38 to 8/38 of the path: 8 midpoints.
+        let geometry = geometry();
+        let from = |depth: f64| {
+            geometry.pacific_path_fraction(&hypocenter(36.5, 140.0, depth), 36.5, 140.0)
+        };
+
+        assert_close(from(320.0), 4.0 / 60.0, 1e-12);
+        assert_close(from(330.0), 5.0 / 60.0, 1e-12);
+        assert_close(from(380.0), 8.0 / 60.0, 1e-12);
+    }
+
+    #[test]
+    fn path_through_a_dipping_slab_uses_the_perpendicular_thickness() {
+        // On the equator the Izu-Bonin slab deepens eastward by 4/3 km per km,
+        // so cos_dip is 0.6 and the 30 km thick slab spans 50 km vertically.
+        // Going up from 80 km below its top, the path is in it from 30/D to
+        // 80/D of the path (D is the hypocenter depth): 7 midpoints, but only
+        // 4 when the thickness is taken as vertical.
+        let step = 4.0 / 3.0 * node_spacing();
+        let izu_bonin = SlabGrid::parse(&format!(
+            "140,0,300,30\n140.05,0,{middle_depth},30\n140.1,0,{east_depth},30\n\
+             140,0.05,300,30\n140.05,0.05,{middle_depth},30\n140.1,0.05,{east_depth},30",
+            middle_depth = 300.0 + step,
+            east_depth = 300.0 + 2.0 * step,
+        ))
+        .expect("the dipping grid should parse");
+        let geometry = SlabGeometry::new(
+            test_support::flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            izu_bonin,
+        );
+        let depth = 300.0 + step + 80.0;
+
+        assert_close(
+            geometry.pacific_path_fraction(&hypocenter(0.0, 140.05, depth), 0.0, 140.05),
+            7.0 / 60.0,
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn path_follows_the_chord_below_the_surface() {
+        // Between two surface points 4 degrees apart on the equator, the chord
+        // sinks to about 3.9 km and is 1 to 2 km deep for 10 of the 60 midpoints.
+        let geometry = SlabGeometry::new(
+            test_support::flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            test_support::flat(-1.0, 1.0, 137.0, 143.0, 1.0, 1.0),
+        );
+
+        let fraction = geometry.pacific_path_fraction(&hypocenter(0.0, 138.0, 0.0), 0.0, 142.0);
+
+        assert_close(fraction, 10.0 / 60.0, 1e-12);
+    }
+
+    #[test]
+    fn path_switches_grids_at_35_degrees() {
+        // Both grids cover the whole path, but only the Kuril slab (10 to 40
+        // km) is shallow enough. The first 36 midpoints are north of 35 degrees.
+        let geometry = SlabGeometry::new(
+            test_support::flat(34.0, 38.0, 138.0, 142.0, 10.0, 30.0),
+            test_support::flat(33.0, 37.0, 138.0, 142.0, 100.0, 30.0),
+        );
+
+        let fraction = geometry.pacific_path_fraction(&hypocenter(35.6, 140.0, 30.0), 34.6, 140.0);
+
+        assert_close(fraction, 36.0 / 60.0, 1e-12);
+    }
+
+    #[test]
+    fn slab_top_and_bottom_are_inside() {
+        // Going up from 80 km, the midpoints at 7/8 and 5/8 of the path are
+        // exactly 10 and 30 km deep, the top and bottom of the slab.
+        let geometry = SlabGeometry::new(
+            test_support::flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            test_support::flat(-1.0, 1.0, -1.0, 1.0, 10.0, 20.0),
+        );
+
+        let fraction = geometry.pacific_path_fraction(&hypocenter(0.0, 0.0, 80.0), 0.0, 0.0);
+
+        assert_close(fraction, 16.0 / 60.0, 1e-12);
+    }
+
+    #[test]
+    fn path_outside_the_grids_is_zero() {
+        let geometry = SlabGeometry::new(
+            test_support::flat(37.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            test_support::flat(32.0, 34.95, 138.0, 142.0, 250.0, 50.0),
+        );
+
+        let fraction = geometry.pacific_path_fraction(&hypocenter(36.5, 140.0, 320.0), 36.5, 140.0);
+
+        assert_close(fraction, 0.0, 0.0);
+    }
+
+    #[test]
+    fn unknown_depth_gives_nan_updip_and_zero_path_fraction() {
+        let geometry = geometry();
+        let hypocenter = hypocenter(36.5, 140.0, f64::NAN);
+
+        let updip = geometry.updip_depth_difference(&hypocenter, 37.0, 141.0);
+        assert!(updip.is_nan(), "{updip}");
+        assert_close(
+            geometry.pacific_path_fraction(&hypocenter, 36.5, 140.0),
+            0.0,
+            0.0,
+        );
     }
 }
