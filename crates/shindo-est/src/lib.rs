@@ -3,4 +3,5 @@
 pub mod features;
 pub mod geodesy;
 pub mod input;
+pub mod intensity;
 pub mod slab;
