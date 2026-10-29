@@ -1,0 +1,463 @@
+//! Reading `LightGBM` models saved in its text format.
+
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+
+use crate::forest::{Forest, ModelError, Tree};
+
+/// Prefix of the line that starts a tree.
+const TREE_START: &str = "Tree=";
+/// Line that follows the last tree. Feature importances and parameters come
+/// after it and are not read.
+const TREES_END: &str = "end of trees";
+
+/// Keys read before the trees, each of which may appear once.
+const HEADER_KEYS: [&str; 3] = ["max_feature_idx", "num_tree_per_iteration", "num_class"];
+
+/// The value of a `key=value` line and where it is.
+#[derive(Clone, Copy, Debug)]
+struct Entry<'a> {
+    line: usize,
+    value: &'a str,
+}
+
+/// The `key=value` lines of one tree, by key.
+type TreeLines<'a> = HashMap<&'a str, Entry<'a>>;
+
+/// Reads a regression model with numerical splits from `LightGBM`'s text format.
+///
+/// # Errors
+///
+/// Returns a [`ModelError`] when a value cannot be read, a required key is
+/// missing or repeated, the text ends before "end of trees", the model has no
+/// trees, several outputs, categorical splits, or linear trees, or its trees
+/// are malformed.
+pub fn parse(text: &str) -> Result<Forest, ModelError> {
+    let mut feature_count = None;
+    let mut trees = Vec::new();
+    let mut tree: Option<TreeLines<'_>> = None;
+    let mut ended = false;
+    let mut header_keys: HashSet<&str> = HashSet::new();
+    let numbered_lines = text.lines().enumerate();
+    for (index, line) in numbered_lines {
+        let line_number = index + 1;
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(TREE_START) || line == TREES_END {
+            if let Some(lines) = tree.take() {
+                trees.push(build_tree(&lines)?);
+            }
+            if line == TREES_END {
+                ended = true;
+                break;
+            }
+            tree = Some(HashMap::new());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if let Some(lines) = tree.as_mut() {
+            let entry = Entry {
+                line: line_number,
+                value,
+            };
+            if lines.insert(key, entry).is_some() {
+                return Err(ModelError::RepeatedKey { line: line_number });
+            }
+            continue;
+        }
+        if HEADER_KEYS.contains(&key) && !header_keys.insert(key) {
+            return Err(ModelError::RepeatedKey { line: line_number });
+        }
+        match key {
+            "max_feature_idx" => {
+                let max_index: usize = number(value, line_number)?;
+                let count = max_index
+                    .checked_add(1)
+                    .ok_or(ModelError::InvalidValue { line: line_number })?;
+                feature_count = Some(count);
+            }
+            "num_tree_per_iteration" | "num_class" => {
+                let count: usize = number(value, line_number)?;
+                if count != 1 {
+                    return Err(ModelError::MultiClass);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !ended {
+        return Err(ModelError::Truncated);
+    }
+    let feature_count = feature_count.ok_or(ModelError::MissingKey {
+        key: "max_feature_idx",
+    })?;
+    Forest::new(feature_count, trees)
+}
+
+/// Builds a tree from its lines.
+fn build_tree(lines: &TreeLines<'_>) -> Result<Tree, ModelError> {
+    let categorical_count: usize = single(lines, "num_cat")?;
+    if categorical_count != 0 {
+        return Err(ModelError::Categorical);
+    }
+    let linear: u8 = single(lines, "is_linear")?;
+    if linear != 0 {
+        return Err(ModelError::Linear);
+    }
+    let leaf_count: usize = single(lines, "num_leaves")?;
+    let leaf_value: Vec<f64> = numbers(lines, "leaf_value")?;
+    // Tree::new counts the leaves in leaf_value, so the declared count is
+    // checked here.
+    if leaf_value.len() != leaf_count {
+        return Err(ModelError::InvalidValue {
+            line: required(lines, "num_leaves")?.line,
+        });
+    }
+    let split_feature: Vec<u32> = numbers(lines, "split_feature")?;
+    let threshold: Vec<f64> = numbers(lines, "threshold")?;
+    let decision_type: Vec<u8> = numbers(lines, "decision_type")?;
+    let left_child: Vec<i32> = numbers(lines, "left_child")?;
+    let right_child: Vec<i32> = numbers(lines, "right_child")?;
+    Tree::new(
+        &split_feature,
+        &threshold,
+        &decision_type,
+        &left_child,
+        &right_child,
+        &leaf_value,
+    )
+}
+
+/// Returns the entry of a key that must be present.
+fn required<'a>(lines: &TreeLines<'a>, key: &'static str) -> Result<Entry<'a>, ModelError> {
+    lines
+        .get(key)
+        .copied()
+        .ok_or(ModelError::MissingKey { key })
+}
+
+/// Reads the one number of a key.
+fn single<T: FromStr>(lines: &TreeLines<'_>, key: &'static str) -> Result<T, ModelError> {
+    let entry = required(lines, key)?;
+    number(entry.value, entry.line)
+}
+
+/// Reads the whitespace-separated numbers of a key. A blank value has none.
+fn numbers<T: FromStr>(lines: &TreeLines<'_>, key: &'static str) -> Result<Vec<T>, ModelError> {
+    let entry = required(lines, key)?;
+    entry
+        .value
+        .split_whitespace()
+        .map(|item| number(item, entry.line))
+        .collect()
+}
+
+/// Reads one number, such as `1.5`, `inf`, or `-nan`, ignoring spaces around it.
+fn number<T: FromStr>(text: &str, line: usize) -> Result<T, ModelError> {
+    text.trim()
+        .parse()
+        .map_err(|_| ModelError::InvalidValue { line })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Node 0 sends feature 0 at or below 1.5 to leaf 0, and 0 (and missing
+    // values, read as 0) to the right. Node 1 sends feature 1 at or below 0 to
+    // leaf 1, and NaN to the right.
+    const TWO_TREES: &str = "tree
+version=v4
+num_class=1
+num_tree_per_iteration=1
+max_feature_idx=1
+objective=regression
+
+Tree=0
+num_leaves=3
+num_cat=0
+is_linear=0
+split_feature=0 1
+threshold=1.5 0
+decision_type=4 8
+left_child=-1 -2
+right_child=1 -3
+leaf_value=10 20 30
+shrinkage=1
+
+Tree=1
+num_leaves=1
+num_cat=0
+is_linear=0
+split_feature=
+threshold=
+decision_type=
+left_child=
+right_child=
+leaf_value=0.5
+shrinkage=1
+
+
+end of trees
+
+Tree=999
+num_leaves=x
+
+feature_importances:
+Column_0=1
+
+parameters:
+[max_feature_idx: 99]
+max_feature_idx=99
+end of parameters
+";
+
+    fn parse_with(old: &str, new: &str) -> Result<Forest, ModelError> {
+        assert!(TWO_TREES.contains(old), "{old:?}");
+        super::parse(&TWO_TREES.replacen(old, new, 1))
+    }
+
+    #[test]
+    fn reads_feature_and_tree_counts() {
+        let forest = super::parse(TWO_TREES).expect("the model should parse");
+
+        assert_eq!(forest.feature_count(), 2);
+        assert_eq!(forest.tree_count(), 2);
+    }
+
+    #[test]
+    fn evaluates_like_the_hand_built_trees() {
+        let forest = super::parse(TWO_TREES).expect("the model should parse");
+
+        assert_eq!(forest.raw(&[1.5, 5.0]), 10.5);
+        assert_eq!(forest.raw(&[-1.0, 5.0]), 10.5);
+        assert_eq!(forest.raw(&[2.0, 0.0]), 20.5);
+        assert_eq!(forest.raw(&[2.0, 0.1]), 30.5);
+        assert_eq!(forest.raw(&[0.0, -1.0]), 20.5);
+        assert_eq!(forest.raw(&[2.0, f64::NAN]), 30.5);
+    }
+
+    #[test]
+    fn crlf_reads_the_same_as_lf() {
+        let crlf = TWO_TREES.replace('\n', "\r\n");
+        let forest = super::parse(&crlf).expect("CRLF should parse");
+        // A text may also stop right after the "\r" of "end of trees".
+        let end = crlf.find("end of trees").expect("the model ends its trees");
+        let cut =
+            super::parse(&crlf[..end + "end of trees\r".len()]).expect("a cut CRLF should parse");
+
+        assert_eq!(forest.raw(&[2.0, 0.0]), 20.5);
+        assert_eq!(forest.raw(&[2.0, 0.1]), 30.5);
+        assert_eq!(cut.raw(&[2.0, 0.1]), 30.5);
+    }
+
+    #[test]
+    fn reads_infinite_and_nan_values() {
+        let infinite = parse_with("threshold=1.5 0", "threshold=inf 0")
+            .expect("an infinite threshold should parse");
+        assert_eq!(infinite.raw(&[1e300, 5.0]), 10.5);
+
+        for nan in ["nan", "-nan"] {
+            let forest = parse_with("leaf_value=0.5", &format!("leaf_value={nan}"))
+                .unwrap_or_else(|error| panic!("{nan} should parse: {error}"));
+            let raw = forest.raw(&[1.5, 5.0]);
+            assert!(raw.is_nan(), "{nan}: {raw}");
+        }
+        let negative = parse_with("threshold=1.5 0", "threshold=-inf 0")
+            .expect("a negative infinite threshold should parse");
+        // -1 is above -inf, though at or below the original 1.5.
+        assert_eq!(negative.raw(&[-1.0, 5.0]), 30.5);
+        let exponent =
+            parse_with("leaf_value=0.5", "leaf_value=5e-1").expect("an exponent should parse");
+        assert_eq!(exponent.raw(&[1.5, 5.0]), 10.5);
+    }
+
+    #[test]
+    fn reads_values_with_extra_spaces() {
+        let cases = [
+            ("leaf_value=10 20 30", "leaf_value=10  20 30"),
+            ("leaf_value=10 20 30", "leaf_value=10\t20\t30"),
+            ("leaf_value=10 20 30", "leaf_value= 10 20 30 "),
+            ("num_leaves=3", "num_leaves= 3 "),
+            ("split_feature=\n", "split_feature= \n"),
+        ];
+
+        for (old, new) in cases {
+            let forest = parse_with(old, new).unwrap_or_else(|error| panic!("{new:?}: {error}"));
+            assert_eq!(forest.raw(&[2.0, 0.1]), 30.5, "{new:?}");
+        }
+    }
+
+    #[test]
+    fn ignores_what_follows_the_trees() {
+        // After "end of trees" come a broken tree and max_feature_idx=99.
+        let forest = super::parse(TWO_TREES).expect("the model should parse");
+
+        assert_eq!(forest.feature_count(), 2);
+        assert_eq!(forest.tree_count(), 2);
+    }
+
+    #[test]
+    fn rejects_categorical_splits() {
+        let error = parse_with(
+            "Tree=0\nnum_leaves=3\nnum_cat=0",
+            "Tree=0\nnum_leaves=3\nnum_cat=1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ModelError::Categorical);
+    }
+
+    #[test]
+    fn rejects_linear_trees() {
+        let error = parse_with("is_linear=0", "is_linear=1").unwrap_err();
+
+        assert_eq!(error, ModelError::Linear);
+    }
+
+    #[test]
+    fn rejects_unreadable_counts_and_flags() {
+        let cases = [
+            ("num_class=1", "num_class=x", 3),
+            ("num_tree_per_iteration=1", "num_tree_per_iteration=", 4),
+            ("num_cat=0", "num_cat=x", 10),
+            ("is_linear=0", "is_linear=x", 11),
+        ];
+
+        for (old, new, line) in cases {
+            assert_eq!(
+                parse_with(old, new).unwrap_err(),
+                ModelError::InvalidValue { line },
+                "{new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_repeated_keys() {
+        let in_tree = parse_with(
+            "leaf_value=10 20 30",
+            "leaf_value=10 20 30\nleaf_value=1 2 3",
+        )
+        .unwrap_err();
+        let in_header =
+            parse_with("max_feature_idx=1", "max_feature_idx=1\nmax_feature_idx=5").unwrap_err();
+
+        assert_eq!(in_tree, ModelError::RepeatedKey { line: 18 });
+        assert_eq!(in_header, ModelError::RepeatedKey { line: 6 });
+    }
+
+    #[test]
+    fn rejects_multiclass() {
+        let per_iteration =
+            parse_with("num_tree_per_iteration=1", "num_tree_per_iteration=3").unwrap_err();
+        let classes = parse_with("num_class=1", "num_class=3").unwrap_err();
+
+        assert_eq!(per_iteration, ModelError::MultiClass);
+        assert_eq!(classes, ModelError::MultiClass);
+    }
+
+    #[test]
+    fn rejects_missing_max_feature_idx() {
+        let error = parse_with("max_feature_idx=1\n", "").unwrap_err();
+
+        assert_eq!(
+            error,
+            ModelError::MissingKey {
+                key: "max_feature_idx"
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_each_missing_tree_key() {
+        let keys = [
+            "num_leaves",
+            "num_cat",
+            "is_linear",
+            "split_feature",
+            "threshold",
+            "decision_type",
+            "left_child",
+            "right_child",
+            "leaf_value",
+        ];
+
+        for tree in ["Tree=0", "Tree=1"] {
+            let start = TWO_TREES.find(tree).expect("the model has the tree");
+            for key in keys {
+                let line_start = start
+                    + TWO_TREES[start..]
+                        .find(&format!("\n{key}="))
+                        .expect("the tree has the key")
+                    + 1;
+                let line_end =
+                    line_start + TWO_TREES[line_start..].find('\n').expect("the line ends") + 1;
+                let text = format!("{}{}", &TWO_TREES[..line_start], &TWO_TREES[line_end..]);
+
+                assert_eq!(
+                    super::parse(&text).unwrap_err(),
+                    ModelError::MissingKey { key },
+                    "{tree} without {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_a_file_without_trees() {
+        let start = TWO_TREES.find("Tree=0").expect("the model has trees");
+        let end = TWO_TREES
+            .find("end of trees")
+            .expect("the model ends its trees");
+        let text = format!("{}{}", &TWO_TREES[..start], &TWO_TREES[end..]);
+
+        assert_eq!(super::parse(&text).unwrap_err(), ModelError::NoTrees);
+    }
+
+    #[test]
+    fn rejects_a_file_cut_before_the_end_of_trees() {
+        let end = TWO_TREES
+            .find("end of trees")
+            .expect("the model ends its trees");
+
+        assert_eq!(
+            super::parse(&TWO_TREES[..end]).unwrap_err(),
+            ModelError::Truncated
+        );
+    }
+
+    #[test]
+    fn rejects_a_broken_number() {
+        let error = parse_with("leaf_value=10 20 30", "leaf_value=10 x 30").unwrap_err();
+
+        assert_eq!(error, ModelError::InvalidValue { line: 17 });
+    }
+
+    #[test]
+    fn rejects_zero_leaves() {
+        let text = TWO_TREES
+            .replacen("num_leaves=1\n", "num_leaves=0\n", 1)
+            .replacen("leaf_value=0.5\n", "leaf_value=\n", 1);
+
+        assert_eq!(super::parse(&text).unwrap_err(), ModelError::NoLeaves);
+    }
+
+    #[test]
+    fn rejects_an_overflowing_max_feature_idx() {
+        let largest =
+            parse_with("max_feature_idx=1", "max_feature_idx=18446744073709551615").unwrap_err();
+        let negative = parse_with("max_feature_idx=1", "max_feature_idx=-1").unwrap_err();
+
+        assert_eq!(largest, ModelError::InvalidValue { line: 5 });
+        assert_eq!(negative, ModelError::InvalidValue { line: 5 });
+    }
+
+    #[test]
+    fn rejects_num_leaves_not_matching_leaf_values() {
+        let error = parse_with("num_leaves=1\n", "num_leaves=3\n").unwrap_err();
+
+        assert_eq!(error, ModelError::InvalidValue { line: 21 });
+    }
+}

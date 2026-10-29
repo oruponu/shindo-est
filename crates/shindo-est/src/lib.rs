@@ -5,4 +5,5 @@ pub mod forest;
 pub mod geodesy;
 pub mod input;
 pub mod intensity;
+pub mod lightgbm_text;
 pub mod slab;

@@ -42,6 +42,28 @@ pub enum ModelError {
     NoFeatures,
     /// A split is categorical; only numerical splits are supported.
     Categorical,
+    /// A tree is linear; only constant leaves are supported.
+    Linear,
+    /// The model builds more than one tree per iteration, as for several
+    /// classes; only single-output models are supported.
+    MultiClass,
+    /// A value in a model file cannot be read or is invalid.
+    InvalidValue {
+        /// Line number, starting at 1.
+        line: usize,
+    },
+    /// A key appears twice in the same part of a model file.
+    RepeatedKey {
+        /// Line number of the second appearance, starting at 1.
+        line: usize,
+    },
+    /// A model file lacks a required key.
+    MissingKey {
+        /// Name of the key.
+        key: &'static str,
+    },
+    /// A model file ends before its trees do.
+    Truncated,
 }
 
 impl fmt::Display for ModelError {
@@ -62,6 +84,14 @@ impl fmt::Display for ModelError {
             Self::NoTrees => f.write_str("the model has no trees"),
             Self::NoFeatures => f.write_str("the model has no features"),
             Self::Categorical => f.write_str("categorical splits are not supported"),
+            Self::Linear => f.write_str("linear trees are not supported"),
+            Self::MultiClass => f.write_str("models with several outputs are not supported"),
+            Self::InvalidValue { line } => {
+                write!(f, "line {line}: the value cannot be read or is invalid")
+            }
+            Self::RepeatedKey { line } => write!(f, "line {line}: the key appears again"),
+            Self::MissingKey { key } => write!(f, "the model has no {key}"),
+            Self::Truncated => f.write_str("the model ends before \"end of trees\""),
         }
     }
 }
