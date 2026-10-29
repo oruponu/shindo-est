@@ -433,7 +433,17 @@ fn difference(at: impl Fn(usize) -> f64, index: usize, count: usize) -> f64 {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::SlabGrid;
+    use super::{SlabGeometry, SlabGrid};
+
+    /// Returns a geometry whose Kuril grid has its top at 300 km from 35
+    /// degrees north and whose Izu-Bonin grid has its top at 250 km up to
+    /// 34.95 degrees north, both 50 km thick, between 138 and 142 degrees east.
+    pub fn geometry() -> SlabGeometry {
+        SlabGeometry::new(
+            flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
+            flat(32.0, 34.95, 138.0, 142.0, 250.0, 50.0),
+        )
+    }
 
     /// Returns a grid at the Slab2 spacing with the same depth and thickness everywhere.
     pub fn flat(
@@ -759,18 +769,9 @@ mod tests {
         }
     }
 
-    // Kuril grid with its top at 300 km from 35 degrees north, and Izu-Bonin
-    // grid with its top at 250 km up to 34.95 degrees north.
-    fn geometry() -> SlabGeometry {
-        SlabGeometry::new(
-            test_support::flat(35.0, 38.0, 138.0, 142.0, 300.0, 50.0),
-            test_support::flat(32.0, 34.95, 138.0, 142.0, 250.0, 50.0),
-        )
-    }
-
     #[test]
     fn top_depth_uses_kuril_north_of_35_and_izu_south() {
-        let geometry = geometry();
+        let geometry = test_support::geometry();
 
         assert_close(geometry.pacific_top_depth(35.0, 140.0), 300.0, 1e-9);
         assert_close(geometry.pacific_top_depth(34.9, 140.0), 250.0, 1e-9);
@@ -780,7 +781,7 @@ mod tests {
 
     #[test]
     fn updip_is_hypocenter_depth_minus_top() {
-        let geometry = geometry();
+        let geometry = test_support::geometry();
         let deep = hypocenter(36.5, 140.0, 400.0);
         let shallow = hypocenter(36.5, 140.0, 200.0);
 
@@ -810,7 +811,7 @@ mod tests {
         // it for its first 1/16, which holds the midpoints of 4 of the 60
         // segments. From 330 km it is the first 1/11: 5 midpoints but 6 segment
         // starts. From 380 km it is from 3/38 to 8/38 of the path: 8 midpoints.
-        let geometry = geometry();
+        let geometry = test_support::geometry();
         let from = |depth: f64| {
             geometry.pacific_path_fraction(&hypocenter(36.5, 140.0, depth), 36.5, 140.0)
         };
@@ -904,7 +905,7 @@ mod tests {
 
     #[test]
     fn unknown_depth_gives_nan_updip_and_zero_path_fraction() {
-        let geometry = geometry();
+        let geometry = test_support::geometry();
         let hypocenter = hypocenter(36.5, 140.0, f64::NAN);
 
         let updip = geometry.updip_depth_difference(&hypocenter, 37.0, 141.0);

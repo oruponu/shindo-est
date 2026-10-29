@@ -21,6 +21,6 @@ pub struct Site {
     /// Longitude in degrees.
     pub longitude: f64,
     /// Amplification of peak ground velocity relative to engineering bedrock.
-    /// Ignored by models that do not use it.
+    /// Must be finite and positive.
     pub arv: f64,
 }
