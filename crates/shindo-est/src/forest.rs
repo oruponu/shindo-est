@@ -51,6 +51,10 @@ pub enum ModelError {
     /// The model builds more than one tree per iteration, as for several
     /// classes; only single-output models are supported.
     MultiClass,
+    /// The model predicts from the mean of its trees, as random forests do,
+    /// while its raw score is their sum; only models that predict from the
+    /// raw score are supported.
+    AveragedOutput,
     /// A value in a model file cannot be read or is invalid.
     InvalidValue {
         /// Line number, starting at 1.
@@ -103,6 +107,9 @@ impl fmt::Display for ModelError {
             Self::NonFiniteLeafValue => f.write_str("a leaf value is NaN or infinite"),
             Self::Linear => f.write_str("linear trees are not supported"),
             Self::MultiClass => f.write_str("models with several outputs are not supported"),
+            Self::AveragedOutput => {
+                f.write_str("models that average their trees are not supported")
+            }
             Self::InvalidValue { line } => {
                 write!(f, "line {line}: the value cannot be read or is invalid")
             }

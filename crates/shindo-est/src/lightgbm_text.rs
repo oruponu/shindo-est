@@ -10,6 +10,10 @@ const TREE_START: &str = "Tree=";
 /// Line that follows the last tree. Feature importances and parameters come
 /// after it and are not read.
 const TREES_END: &str = "end of trees";
+/// Header key of a model that predicts from the mean of its trees rather than
+/// their sum, as random forests do. `LightGBM` averages whenever the key is
+/// present, with or without a value.
+const AVERAGE_OUTPUT: &str = "average_output";
 
 /// Keys read before the trees, each of which may appear once.
 const HEADER_KEYS: [&str; 3] = ["max_feature_idx", "num_tree_per_iteration", "num_class"];
@@ -30,8 +34,8 @@ type TreeLines<'a> = HashMap<&'a str, Entry<'a>>;
 ///
 /// Returns a [`ModelError`] when a value cannot be read, a required key is
 /// missing or repeated, the text ends before "end of trees", the model has no
-/// trees, several outputs, categorical splits, or linear trees, or its trees
-/// are malformed.
+/// trees, several outputs, averaged trees, categorical splits, or linear
+/// trees, or its trees are malformed.
 pub fn parse(text: &str) -> Result<Forest, ModelError> {
     let mut feature_count = None;
     let mut trees = Vec::new();
@@ -53,7 +57,11 @@ pub fn parse(text: &str) -> Result<Forest, ModelError> {
             tree = Some(HashMap::new());
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let split = line.split_once('=');
+        if tree.is_none() && split.map_or(line, |(key, _)| key) == AVERAGE_OUTPUT {
+            return Err(ModelError::AveragedOutput);
+        }
+        let Some((key, value)) = split else {
             continue;
         };
         if let Some(lines) = tree.as_mut() {
@@ -359,6 +367,42 @@ end of parameters
 
         assert_eq!(in_tree, ModelError::RepeatedKey { line: 18 });
         assert_eq!(in_header, ModelError::RepeatedKey { line: 6 });
+    }
+
+    #[test]
+    fn rejects_averaged_output() {
+        // LightGBM averages the trees whenever the key is in the header,
+        // whatever its value.
+        let lines = ["average_output", "average_output=1", "average_output=0"];
+        for line in lines {
+            let error = parse_with(
+                "objective=regression\n",
+                &format!("objective=regression\n{line}\n"),
+            )
+            .unwrap_err();
+            assert_eq!(error, ModelError::AveragedOutput, "{line:?}");
+        }
+
+        let crlf = TWO_TREES
+            .replacen(
+                "objective=regression\n",
+                "objective=regression\naverage_output\n",
+                1,
+            )
+            .replace('\n', "\r\n");
+        assert_eq!(super::parse(&crlf).unwrap_err(), ModelError::AveragedOutput);
+    }
+
+    #[test]
+    fn reads_average_output_only_in_the_header() {
+        let in_tree = parse_with(
+            "shrinkage=1\n\n\nend",
+            "shrinkage=1\naverage_output\n\n\nend",
+        );
+        let after_trees = parse_with("end of trees\n", "end of trees\naverage_output\n");
+
+        assert!(in_tree.is_ok(), "{in_tree:?}");
+        assert!(after_trees.is_ok(), "{after_trees:?}");
     }
 
     #[test]
