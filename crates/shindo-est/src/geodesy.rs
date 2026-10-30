@@ -15,19 +15,21 @@ const MINOR_AXIS: f64 = MAJOR_AXIS * AXIS_RATIO;
 const SECOND_ECCENTRICITY_SQUARED: f64 =
     (MAJOR_AXIS * MAJOR_AXIS - MINOR_AXIS * MINOR_AXIS) / (MINOR_AXIS * MINOR_AXIS);
 
-// Vincenty's iteration stops when lambda changes by at most this many radians.
+/// Vincenty's iteration stops when lambda changes by at most this many radians.
 const VINCENTY_CONVERGENCE: f64 = 1e-12;
-// Vincenty's formula gives NaN after this many iterations without converging.
+/// Vincenty's formula gives NaN after this many iterations without converging.
 const VINCENTY_MAX_ITERATIONS: u32 = 1000;
-// Below this, sin^2(sigma) is treated as zero (the two points coincide or are antipodal).
+/// Below this, sin^2(sigma) is treated as zero (the two points coincide or are antipodal).
 const DEGENERATE_SIN_SIGMA_SQUARED: f64 = 1e-24;
+/// Degrees in a full turn of longitude.
+const FULL_TURN: f64 = 360.0;
 
 /// Distances in km from a hypocenter to a point on the surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Distances {
     /// Straight-line distance from the hypocenter.
     pub hypocentral: f64,
-    /// Distance along the surface from the epicenter. NaN where Vincenty's formula does not converge.
+    /// Distance along the surface from the epicenter.
     pub epicentral: f64,
 }
 
@@ -35,7 +37,12 @@ pub struct Distances {
 ///
 /// The hypocentral distance treats the Earth as a sphere of [`EARTH_RADIUS`] with
 /// geocentric latitudes. The epicentral distance is the geodesic on GRS80 by
-/// Vincenty's formula.
+/// Vincenty's formula, or, near the antipode where that formula does not
+/// converge, the great-circle distance on the same sphere as the hypocentral
+/// distance. That stand-in differs from the geodesic by up to about 22 km
+/// (0.11%). Vincenty's formula stops converging no farther than about 0.6
+/// degrees from the antipode, and the epicentral distance jumps by as much
+/// there.
 #[must_use]
 pub fn distances(hypocenter: &Hypocenter, latitude: f64, longitude: f64) -> Distances {
     let lat1 = geocentric_latitude(hypocenter.latitude);
@@ -46,17 +53,22 @@ pub fn distances(hypocenter: &Hypocenter, latitude: f64, longitude: f64) -> Dist
     let dy = libm::cos(lat1) * libm::sin(lon1) - libm::cos(lat2) * libm::sin(lon2);
     let dz = libm::sin(lat1) - libm::sin(lat2);
     let chord_squared = dx * dx + dy * dy + dz * dz;
-    let cos_angle = 1.0 - chord_squared * 0.5;
-    let radius = EARTH_RADIUS - hypocenter.depth;
-    let hypocentral = (radius * radius + EARTH_RADIUS * EARTH_RADIUS
-        - 2.0 * radius * EARTH_RADIUS * cos_angle)
-        .sqrt();
-    let epicentral = vincenty(
+    let depth = hypocenter.depth;
+    let radius = EARTH_RADIUS - depth;
+    // Equal to r^2 + R^2 - 2rR cos(angle), but without the cancellation that
+    // makes that form NaN or far off for depths near zero.
+    let hypocentral = (depth * depth + radius * EARTH_RADIUS * chord_squared).sqrt();
+    let geodesic = vincenty(
         hypocenter.latitude,
         hypocenter.longitude,
         latitude,
         longitude,
     );
+    let epicentral = if geodesic.is_nan() {
+        great_circle(chord_squared)
+    } else {
+        geodesic
+    };
     Distances {
         hypocentral,
         epicentral,
@@ -68,9 +80,35 @@ fn geocentric_latitude(latitude: f64) -> f64 {
     libm::atan(AXIS_RATIO * AXIS_RATIO * libm::tan(latitude.to_radians()))
 }
 
-/// Geodesic distance in km on GRS80 by Vincenty's inverse formula.
+/// Returns `to - from` in degrees of longitude, wrapped into -180 (exclusive)
+/// to 180 (inclusive), so that the same meridian written as 180 and -180
+/// differs by 0.
+#[must_use]
+pub(crate) fn longitude_difference(from: f64, to: f64) -> f64 {
+    let difference = (to - from) % FULL_TURN;
+    if difference > FULL_TURN / 2.0 {
+        difference - FULL_TURN
+    } else if difference <= -FULL_TURN / 2.0 {
+        difference + FULL_TURN
+    } else {
+        difference
+    }
+}
+
+/// Returns the great-circle distance in km on a sphere of [`EARTH_RADIUS`]
+/// from the squared distance between the unit vectors of two points.
+fn great_circle(chord_squared: f64) -> f64 {
+    let half_chord = chord_squared.sqrt() / 2.0;
+    // Rounding can make half the chord slightly more than 1 for antipodes. Not
+    // f64::min, which would turn a NaN chord into 1.
+    let sine = if half_chord > 1.0 { 1.0 } else { half_chord };
+    EARTH_RADIUS * 2.0 * libm::asin(sine)
+}
+
+/// Geodesic distance in km on GRS80 by Vincenty's inverse formula, or NaN
+/// where it does not converge.
 fn vincenty(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let lon_diff = (lon2 - lon1).to_radians();
+    let lon_diff = longitude_difference(lon1, lon2).to_radians();
     let tan_u1 = AXIS_RATIO * libm::tan(lat1.to_radians());
     let cos_u1 = 1.0 / (1.0 + tan_u1 * tan_u1).sqrt();
     let sin_u1 = tan_u1 * cos_u1;
@@ -80,9 +118,9 @@ fn vincenty(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let antipodal = lon_diff.abs() > PI / 2.0 || (lat2 - lat1).abs() > 90.0;
 
     let mut lambda = lon_diff;
-    let mut sigma = if antipodal { PI } else { 0.0 };
-    let mut sin_sigma = 0.0;
-    let mut cos_sigma = if antipodal { -1.0 } else { 1.0 };
+    let mut sigma;
+    let mut sin_sigma;
+    let mut cos_sigma;
     let mut cos_2sigma_m = 1.0;
     let mut cos_alpha_squared = 1.0;
     let mut iterations = 0;
@@ -92,6 +130,11 @@ fn vincenty(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
         let b = cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_lambda;
         let sin_sigma_squared = a * a + b * b;
         if sin_sigma_squared < DEGENERATE_SIN_SIGMA_SQUARED {
+            // The points coincide or are antipodal, whatever their longitudes
+            // say (as at a pole), and cos(sigma) tells which.
+            sin_sigma = 0.0;
+            cos_sigma = sin_u1 * sin_u2 + cos_u1 * cos_u2 * cos_lambda;
+            sigma = if cos_sigma > 0.0 { 0.0 } else { PI };
             break;
         }
         sin_sigma = sin_sigma_squared.sqrt();
@@ -203,6 +246,95 @@ mod tests {
 
         assert!(d.hypocentral.is_nan(), "{d:?}");
         assert!(d.epicentral.is_nan(), "{d:?}");
+    }
+
+    #[test]
+    fn same_point_across_the_date_line_or_at_a_pole_is_zero() {
+        let cases = [
+            (35.0, 180.0, 35.0, -180.0),
+            (35.0, -180.0, 35.0, 180.0),
+            (90.0, 0.0, 90.0, 120.0),
+            (-90.0, 10.0, -90.0, -170.0),
+        ];
+        for (latitude, longitude, site_latitude, site_longitude) in cases {
+            let d = super::distances(
+                &hypocenter(latitude, longitude, 10.0),
+                site_latitude,
+                site_longitude,
+            );
+            assert!(d.epicentral.abs() <= 1e-9, "{latitude}, {longitude}: {d:?}");
+            assert!(
+                (d.hypocentral - 10.0).abs() <= 1e-9,
+                "{latitude}, {longitude}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crossing_the_date_line_matches_crossing_greenwich() {
+        // The same longitude difference gives the same geodesic to the bit,
+        // in either direction.
+        let cases = [
+            ((179.0, -179.0), (-1.0, 1.0)),
+            ((-179.0, 179.0), (1.0, -1.0)),
+        ];
+        for ((from, to), (greenwich_from, greenwich_to)) in cases {
+            let across = super::distances(&hypocenter(35.0, from, 10.0), 35.0, to);
+            let greenwich =
+                super::distances(&hypocenter(35.0, greenwich_from, 10.0), 35.0, greenwich_to);
+
+            assert_eq!(
+                across.epicentral.to_bits(),
+                greenwich.epicentral.to_bits(),
+                "{across:?} {greenwich:?}"
+            );
+            assert!(
+                (across.hypocentral - greenwich.hypocentral).abs() <= 1e-9,
+                "{across:?} {greenwich:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn antipodal_points_on_the_equator_are_half_a_meridian_apart() {
+        // The shortest path runs over a pole: half the GRS80 meridian.
+        let epicentral = super::distances(&hypocenter(0.0, 0.0, 0.0), 0.0, 180.0).epicentral;
+
+        assert!((epicentral - 20_003.931_458).abs() <= 1e-6, "{epicentral}");
+    }
+
+    #[test]
+    fn near_the_antipode_falls_back_to_a_great_circle() {
+        // The expected distances are 6371.008 km times the angle between the
+        // geocentric unit vectors, computed as atan2(|u x v|, u . v) in Python.
+        let cases = [
+            ((35.0, 140.0), (-35.41, -40.04), 19_969.479_819_476_015),
+            ((0.0, 0.0), (0.0, 179.3965), 19_948.005_706_267_315),
+        ];
+        for ((latitude, longitude), (site_latitude, site_longitude), expected) in cases {
+            let geodesic = super::vincenty(latitude, longitude, site_latitude, site_longitude);
+            assert!(geodesic.is_nan(), "{geodesic}");
+
+            let epicentral = super::distances(
+                &hypocenter(latitude, longitude, 0.0),
+                site_latitude,
+                site_longitude,
+            )
+            .epicentral;
+            assert!(
+                (epicentral - expected).abs() <= 1e-9,
+                "{epicentral} km, expected {expected} km"
+            );
+        }
+    }
+
+    #[test]
+    fn tiny_depths_give_exact_hypocentral_distances() {
+        // r^2 + R^2 - 2rR cos(angle) cancels badly for these depths.
+        for depth in [1e-6, 1e-4, 0.0] {
+            let d = super::distances(&hypocenter(35.0, 135.0, depth), 35.0, 135.0);
+            assert_eq!(d.hypocentral, depth, "{d:?}");
+        }
     }
 
     #[test]

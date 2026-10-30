@@ -66,7 +66,7 @@ pub fn compute(hypocenter: &Hypocenter, site: &Site, slabs: &SlabGeometry) -> [f
 fn azimuth(hypocenter: &Hypocenter, site: &Site) -> f64 {
     let lat1 = hypocenter.latitude.to_radians();
     let lat2 = site.latitude.to_radians();
-    let delta = (site.longitude - hypocenter.longitude).to_radians();
+    let delta = geodesy::longitude_difference(hypocenter.longitude, site.longitude).to_radians();
     libm::atan2(
         libm::sin(delta) * libm::cos(lat2),
         libm::cos(lat1) * libm::sin(lat2) - libm::sin(lat1) * libm::cos(lat2) * libm::cos(delta),
@@ -232,6 +232,15 @@ mod tests {
 
         assert_close(feature(&values, "az_sin"), 0.755_928_946_018_454_4, 1e-12);
         assert_close(feature(&values, "az_cos"), 0.654_653_670_707_977_2, 1e-12);
+    }
+
+    #[test]
+    fn same_point_across_the_date_line_points_north() {
+        let values = features(&hypocenter(35.0, 180.0, 10.0), &site(35.0, -180.0));
+
+        assert_close(feature(&values, "az_sin"), 0.0, 0.0);
+        assert_close(feature(&values, "az_cos"), 1.0, 0.0);
+        assert_close(feature(&values, "epi"), 0.0, 1e-9);
     }
 
     #[test]
