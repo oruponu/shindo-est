@@ -8,3 +8,4 @@ pub mod input;
 pub mod intensity;
 pub mod lightgbm_text;
 pub mod slab;
+pub mod validate;
