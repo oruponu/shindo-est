@@ -17,7 +17,7 @@ const MISSING_NAN: u8 = 2;
 /// `LightGBM`'s `kZeroThreshold`: values this close to zero count as zero.
 const ZERO_THRESHOLD: f64 = 1e-35_f32 as f64;
 
-/// An error in the structure of a model.
+/// An error in a model or in the settings that come with it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
 #[non_exhaustive]
@@ -68,6 +68,17 @@ pub enum ModelError {
     },
     /// A model file ends before its trees do.
     Truncated,
+    /// A model does not take the number of features that predictions compute.
+    WrongFeatureCount {
+        /// Number of features of the model.
+        feature_count: usize,
+        /// Number of features that predictions compute.
+        expected: usize,
+    },
+    /// The hurdle settings fail [`HurdleParams::is_valid`].
+    ///
+    /// [`HurdleParams::is_valid`]: crate::hurdle::HurdleParams::is_valid
+    InvalidHurdleParams,
 }
 
 impl fmt::Display for ModelError {
@@ -98,6 +109,14 @@ impl fmt::Display for ModelError {
             Self::RepeatedKey { line } => write!(f, "line {line}: the key appears again"),
             Self::MissingKey { key } => write!(f, "the model has no {key}"),
             Self::Truncated => f.write_str("the model ends before \"end of trees\""),
+            Self::WrongFeatureCount {
+                feature_count,
+                expected,
+            } => write!(
+                f,
+                "the model has {feature_count} features, but predictions use {expected}"
+            ),
+            Self::InvalidHurdleParams => f.write_str("the hurdle parameters are invalid"),
         }
     }
 }
