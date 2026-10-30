@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use crate::forest::{Forest, Tree};
-use crate::model::ModelError;
+use crate::model::{Model, ModelError, Objective};
 
 /// Prefix of the line that starts a tree.
 const TREE_START: &str = "Tree=";
@@ -17,7 +17,30 @@ const TREES_END: &str = "end of trees";
 const AVERAGE_OUTPUT: &str = "average_output";
 
 /// Keys read before the trees, each of which may appear once.
-const HEADER_KEYS: [&str; 3] = ["max_feature_idx", "num_tree_per_iteration", "num_class"];
+const HEADER_KEYS: [&str; 5] = [
+    "max_feature_idx",
+    "num_tree_per_iteration",
+    "num_class",
+    "objective",
+    "feature_names",
+];
+
+/// Objectives, as `LightGBM` writes them, whose prediction is the raw score.
+/// `LightGBM` adds "sqrt" to a regression trained on square-rooted labels,
+/// which predicts the square of its raw score with the sign kept, so that is
+/// not among them.
+const REGRESSION_OBJECTIVES: [&str; 6] = [
+    "regression",
+    "regression_l1",
+    "huber",
+    "fair",
+    "quantile",
+    "mape",
+];
+
+/// Objectives, as `LightGBM` writes them, whose probability is the logistic
+/// function of the raw score.
+const BINARY_OBJECTIVES: [&str; 2] = ["binary sigmoid:1", "cross_entropy"];
 
 /// The value of a `key=value` line and where it is.
 #[derive(Clone, Copy, Debug)]
@@ -29,16 +52,19 @@ struct Entry<'a> {
 /// The `key=value` lines of one tree, by key.
 type TreeLines<'a> = HashMap<&'a str, Entry<'a>>;
 
-/// Reads a regression model with numerical splits from `LightGBM`'s text format.
+/// Reads a model with numerical splits from `LightGBM`'s text format.
 ///
 /// # Errors
 ///
 /// Returns a [`ModelError`] when a value cannot be read, a required key is
 /// missing or repeated, the text ends before "end of trees", the model has no
-/// trees, several outputs, averaged trees, categorical splits, or linear
-/// trees, or its trees are malformed.
-pub fn parse(text: &str) -> Result<Forest, ModelError> {
+/// trees, several outputs, averaged trees, an objective that [`Objective`]
+/// does not cover, feature names that do not match its features, categorical
+/// splits, or linear trees, or its trees are malformed.
+pub fn parse(text: &str) -> Result<Model, ModelError> {
     let mut feature_count = None;
+    let mut objective = None;
+    let mut feature_names = None;
     let mut trees = Vec::new();
     let mut tree: Option<TreeLines<'_>> = None;
     let mut ended = false;
@@ -92,6 +118,13 @@ pub fn parse(text: &str) -> Result<Forest, ModelError> {
                     return Err(ModelError::MultiClass);
                 }
             }
+            "objective" => objective = Some(read_objective(value, line_number)?),
+            "feature_names" => {
+                // LightGBM splits the names at spaces only and skips empty
+                // ones; other white space stays in a name.
+                let names = value.split(' ').filter(|name| !name.is_empty());
+                feature_names = Some(names.map(String::from).collect());
+            }
             _ => {}
         }
     }
@@ -101,7 +134,24 @@ pub fn parse(text: &str) -> Result<Forest, ModelError> {
     let feature_count = feature_count.ok_or(ModelError::MissingKey {
         key: "max_feature_idx",
     })?;
-    Forest::new(feature_count, trees)
+    let objective = objective.ok_or(ModelError::MissingKey { key: "objective" })?;
+    let feature_names = feature_names.ok_or(ModelError::MissingKey {
+        key: "feature_names",
+    })?;
+    Model::new(Forest::new(feature_count, trees)?, objective, feature_names)
+}
+
+/// Reads the value of an `objective` line.
+fn read_objective(value: &str, line: usize) -> Result<Objective, ModelError> {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let normalized = words.join(" ");
+    if REGRESSION_OBJECTIVES.contains(&normalized.as_str()) {
+        Ok(Objective::Regression)
+    } else if BINARY_OBJECTIVES.contains(&normalized.as_str()) {
+        Ok(Objective::Binary)
+    } else {
+        Err(ModelError::UnsupportedObjective { line })
+    }
 }
 
 /// Builds a tree from its lines.
@@ -182,6 +232,7 @@ num_class=1
 num_tree_per_iteration=1
 max_feature_idx=1
 objective=regression
+feature_names=depth arv
 
 Tree=0
 num_leaves=3
@@ -222,14 +273,24 @@ max_feature_idx=99
 end of parameters
 ";
 
-    fn parse_with(old: &str, new: &str) -> Result<Forest, ModelError> {
+    fn parse_model_with(old: &str, new: &str) -> Result<Model, ModelError> {
         assert!(TWO_TREES.contains(old), "{old:?}");
         super::parse(&TWO_TREES.replacen(old, new, 1))
     }
 
+    fn parse_with(old: &str, new: &str) -> Result<Forest, ModelError> {
+        parse_model_with(old, new).map(Model::into_forest)
+    }
+
+    fn parse_forest(text: &str) -> Forest {
+        super::parse(text)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .into_forest()
+    }
+
     #[test]
     fn reads_feature_and_tree_counts() {
-        let forest = super::parse(TWO_TREES).expect("the model should parse");
+        let forest = parse_forest(TWO_TREES);
 
         assert_eq!(forest.feature_count(), 2);
         assert_eq!(forest.tree_count(), 2);
@@ -237,7 +298,7 @@ end of parameters
 
     #[test]
     fn evaluates_like_the_hand_built_trees() {
-        let forest = super::parse(TWO_TREES).expect("the model should parse");
+        let forest = parse_forest(TWO_TREES);
 
         assert_eq!(forest.raw(&[1.5, 5.0]), 10.5);
         assert_eq!(forest.raw(&[-1.0, 5.0]), 10.5);
@@ -250,14 +311,13 @@ end of parameters
     #[test]
     fn crlf_reads_the_same_as_lf() {
         let crlf = TWO_TREES.replace('\n', "\r\n");
-        let forest = super::parse(&crlf).expect("CRLF should parse");
+        let whole = parse_forest(&crlf);
         // A text may also stop right after the "\r" of "end of trees".
         let end = crlf.find("end of trees").expect("the model ends its trees");
-        let cut =
-            super::parse(&crlf[..end + "end of trees\r".len()]).expect("a cut CRLF should parse");
+        let cut = parse_forest(&crlf[..end + "end of trees\r".len()]);
 
-        assert_eq!(forest.raw(&[2.0, 0.0]), 20.5);
-        assert_eq!(forest.raw(&[2.0, 0.1]), 30.5);
+        assert_eq!(whole.raw(&[2.0, 0.0]), 20.5);
+        assert_eq!(whole.raw(&[2.0, 0.1]), 30.5);
         assert_eq!(cut.raw(&[2.0, 0.1]), 30.5);
     }
 
@@ -295,7 +355,7 @@ end of parameters
     #[test]
     fn ignores_what_follows_the_trees() {
         // After "end of trees" come a broken tree and max_feature_idx=99.
-        let forest = super::parse(TWO_TREES).expect("the model should parse");
+        let forest = parse_forest(TWO_TREES);
 
         assert_eq!(forest.feature_count(), 2);
         assert_eq!(forest.tree_count(), 2);
@@ -343,8 +403,8 @@ end of parameters
         let cases = [
             ("num_class=1", "num_class=x", 3),
             ("num_tree_per_iteration=1", "num_tree_per_iteration=", 4),
-            ("num_cat=0", "num_cat=x", 10),
-            ("is_linear=0", "is_linear=x", 11),
+            ("num_cat=0", "num_cat=x", 11),
+            ("is_linear=0", "is_linear=x", 12),
         ];
 
         for (old, new, line) in cases {
@@ -366,8 +426,129 @@ end of parameters
         let in_header =
             parse_with("max_feature_idx=1", "max_feature_idx=1\nmax_feature_idx=5").unwrap_err();
 
-        assert_eq!(in_tree, ModelError::RepeatedKey { line: 18 });
+        assert_eq!(in_tree, ModelError::RepeatedKey { line: 19 });
         assert_eq!(in_header, ModelError::RepeatedKey { line: 6 });
+    }
+
+    #[test]
+    fn reads_the_objective_and_the_feature_names() {
+        let model = super::parse(TWO_TREES).expect("the model should parse");
+
+        assert_eq!(model.objective(), Objective::Regression);
+        assert_eq!(model.feature_names(), ["depth", "arv"]);
+    }
+
+    #[test]
+    fn splits_feature_names_only_at_spaces() {
+        // LightGBM separates the names with spaces and keeps other white space,
+        // such as a tab or a no-break space, inside a name.
+        let model = parse_model_with(
+            "feature_names=depth arv",
+            "feature_names= de\tpth  a\u{a0}rv ",
+        )
+        .expect("the model should parse");
+
+        assert_eq!(model.feature_names(), ["de\tpth", "a\u{a0}rv"]);
+    }
+
+    #[test]
+    fn reads_supported_objectives() {
+        let cases = [
+            ("regression_l1", Objective::Regression),
+            ("huber", Objective::Regression),
+            ("fair", Objective::Regression),
+            ("quantile", Objective::Regression),
+            ("mape", Objective::Regression),
+            ("binary sigmoid:1", Objective::Binary),
+            ("cross_entropy", Objective::Binary),
+        ];
+        for (value, objective) in cases {
+            let model = parse_model_with("objective=regression", &format!("objective={value}"))
+                .unwrap_or_else(|error| panic!("{value:?}: {error}"));
+            assert_eq!(model.objective(), objective, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_objectives_that_transform_the_raw_score() {
+        // None is a regression whose prediction is the raw score or a binary
+        // objective whose probability is the logistic function of it.
+        let values = [
+            "regression sqrt",
+            "regression_l1 sqrt",
+            "poisson",
+            "gamma",
+            "tweedie",
+            "binary sigmoid:2",
+            "binary",
+            "cross_entropy_lambda",
+            "multiclass num_class:3",
+            "lambdarank",
+            "",
+        ];
+        for value in values {
+            let error =
+                parse_with("objective=regression", &format!("objective={value}")).unwrap_err();
+            assert_eq!(
+                error,
+                ModelError::UnsupportedObjective { line: 6 },
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_model_without_an_objective() {
+        // LightGBM writes no objective for a model trained with a custom one.
+        let error = parse_with("objective=regression\n", "").unwrap_err();
+
+        assert_eq!(error, ModelError::MissingKey { key: "objective" });
+    }
+
+    #[test]
+    fn rejects_missing_or_miscounted_feature_names() {
+        let missing = parse_with("feature_names=depth arv\n", "").unwrap_err();
+        let one = parse_with("feature_names=depth arv", "feature_names=depth").unwrap_err();
+        let three =
+            parse_with("feature_names=depth arv", "feature_names=depth arv mj").unwrap_err();
+
+        assert_eq!(
+            missing,
+            ModelError::MissingKey {
+                key: "feature_names"
+            }
+        );
+        assert_eq!(
+            one,
+            ModelError::FeatureNameCount {
+                names: 1,
+                feature_count: 2,
+            }
+        );
+        assert_eq!(
+            three,
+            ModelError::FeatureNameCount {
+                names: 3,
+                feature_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_repeated_objective_or_feature_names() {
+        let objective = parse_with(
+            "objective=regression",
+            "objective=regression\nobjective=regression",
+        )
+        .unwrap_err();
+        let names = parse_with(
+            "feature_names=depth arv",
+            "feature_names=depth arv\nfeature_names=depth arv",
+        )
+        .unwrap_err();
+
+        assert_eq!(objective, ModelError::RepeatedKey { line: 7 });
+        assert_eq!(names, ModelError::RepeatedKey { line: 8 });
     }
 
     #[test]
@@ -490,7 +671,7 @@ end of parameters
     fn rejects_a_broken_number() {
         let error = parse_with("leaf_value=10 20 30", "leaf_value=10 x 30").unwrap_err();
 
-        assert_eq!(error, ModelError::InvalidValue { line: 17 });
+        assert_eq!(error, ModelError::InvalidValue { line: 18 });
     }
 
     #[test]
@@ -516,6 +697,6 @@ end of parameters
     fn rejects_num_leaves_not_matching_leaf_values() {
         let error = parse_with("num_leaves=1\n", "num_leaves=3\n").unwrap_err();
 
-        assert_eq!(error, ModelError::InvalidValue { line: 21 });
+        assert_eq!(error, ModelError::InvalidValue { line: 22 });
     }
 }

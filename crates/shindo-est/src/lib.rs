@@ -15,6 +15,6 @@ pub mod validate;
 pub use hurdle::HurdleParams;
 pub use input::{Hypocenter, Site};
 pub use intensity::IntensityClass;
-pub use model::ModelError;
+pub use model::{Model, ModelError, Objective};
 pub use predict::{Options, PointResult, PointStatus, Predictor};
 pub use validate::InputError;

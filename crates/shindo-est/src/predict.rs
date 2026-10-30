@@ -1,10 +1,10 @@
 //! Intensity prediction for one hypocenter and many sites.
 
-use crate::features::{self, FEATURE_COUNT};
+use crate::features::{self, FEATURE_COUNT, FEATURE_NAMES};
 use crate::forest::Forest;
 use crate::hurdle::{self, HurdleParams};
 use crate::input::{Hypocenter, Site};
-use crate::model::ModelError;
+use crate::model::{Model, ModelError, Objective};
 use crate::slab::SlabGeometry;
 use crate::validate::{self, InputError, Scope};
 
@@ -71,29 +71,26 @@ impl Predictor {
     ///
     /// # Errors
     ///
-    /// Returns [`ModelError::WrongFeatureCount`] when a forest does not take
-    /// [`FEATURE_COUNT`] features, checking the classifier first, and
+    /// Checks the classifier, then the regressor, then `hurdle`, and returns
+    /// [`ModelError::WrongObjective`] when the classifier is not a
+    /// [`Objective::Binary`] model or the regressor not a
+    /// [`Objective::Regression`] model, [`ModelError::WrongFeatures`] when a
+    /// model's feature names are not [`FEATURE_NAMES`] in their order, and
     /// [`ModelError::InvalidHurdleParams`] when `hurdle` is not valid.
     pub fn new(
-        classifier: Forest,
-        regressor: Forest,
+        classifier: Model,
+        regressor: Model,
         slabs: SlabGeometry,
         hurdle: HurdleParams,
     ) -> Result<Self, ModelError> {
-        for forest in [&classifier, &regressor] {
-            if forest.feature_count() != FEATURE_COUNT {
-                return Err(ModelError::WrongFeatureCount {
-                    feature_count: forest.feature_count(),
-                    expected: FEATURE_COUNT,
-                });
-            }
-        }
+        check_model(&classifier, Objective::Binary)?;
+        check_model(&regressor, Objective::Regression)?;
         if !hurdle.is_valid() {
             return Err(ModelError::InvalidHurdleParams);
         }
         Ok(Self {
-            classifier,
-            regressor,
+            classifier: classifier.into_forest(),
+            regressor: regressor.into_forest(),
             slabs,
             hurdle,
         })
@@ -159,11 +156,37 @@ impl Predictor {
     }
 }
 
+/// Checks that a model has `objective` and takes the features predictions
+/// compute.
+fn check_model(model: &Model, objective: Objective) -> Result<(), ModelError> {
+    if model.objective() != objective {
+        return Err(ModelError::WrongObjective {
+            expected: objective,
+            found: model.objective(),
+        });
+    }
+    let names = model.feature_names();
+    let differing = names
+        .iter()
+        .zip(FEATURE_NAMES)
+        .position(|(name, expected)| name != expected);
+    if let Some(index) = differing {
+        return Err(ModelError::WrongFeatures { index });
+    }
+    if names.len() != FEATURE_COUNT {
+        return Err(ModelError::WrongFeatures {
+            index: names.len().min(FEATURE_COUNT),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::FEATURE_NAMES;
     use crate::forest::Tree;
+    use crate::model::Objective;
     use crate::slab::test_support;
     use crate::validate::HypocenterField;
 
@@ -198,14 +221,30 @@ mod tests {
         u32::try_from(index).expect("the index should fit in u32")
     }
 
+    fn feature_names() -> Vec<String> {
+        FEATURE_NAMES.map(String::from).to_vec()
+    }
+
+    fn model(forest: Forest, objective: Objective, feature_names: Vec<String>) -> Model {
+        Model::new(forest, objective, feature_names).expect("the model should be valid")
+    }
+
     fn one_leaf(feature_count: usize, value: f64) -> Forest {
         let tree =
             Tree::new(&[], &[], &[], &[], &[], &[value]).expect("a one-leaf tree should be valid");
         Forest::new(feature_count, vec![tree]).expect("the forest should be valid")
     }
 
+    fn classifier(logit: f64) -> Model {
+        model(
+            one_leaf(FEATURE_COUNT, logit),
+            Objective::Binary,
+            feature_names(),
+        )
+    }
+
     // One split on feature `name`: at or below `threshold` gives 1, above gives 3.
-    fn split_on(name: &str, threshold: f64) -> Forest {
+    fn split_on(name: &str, threshold: f64) -> Model {
         let tree = Tree::new(
             &[feature_index(name)],
             &[threshold],
@@ -215,12 +254,13 @@ mod tests {
             &[1.0, 3.0],
         )
         .expect("the tree should be valid");
-        Forest::new(FEATURE_COUNT, vec![tree]).expect("the forest should be valid")
+        let forest = Forest::new(FEATURE_COUNT, vec![tree]).expect("the forest should be valid");
+        model(forest, Objective::Regression, feature_names())
     }
 
-    fn predictor_with(regressor: Forest) -> Predictor {
+    fn predictor_with(regressor: Model) -> Predictor {
         Predictor::new(
-            one_leaf(FEATURE_COUNT, CLASSIFIER_LEAF),
+            classifier(CLASSIFIER_LEAF),
             regressor,
             test_support::geometry(),
             PARAMS,
@@ -231,6 +271,10 @@ mod tests {
     // The regressor gives 3 from Mj 6 and 1 from Mj 4.
     fn mj_predictor() -> Predictor {
         predictor_with(split_on("mj", 5.0))
+    }
+
+    fn new_predictor(classifier: Model, regressor: Model) -> Result<Predictor, ModelError> {
+        Predictor::new(classifier, regressor, test_support::geometry(), PARAMS)
     }
 
     fn predict(hypocenter: &Hypocenter, sites: &[Site]) -> Vec<PointResult> {
@@ -315,13 +359,8 @@ mod tests {
     #[test]
     fn unfelt_site_is_capped_at_the_ceiling() {
         // A logit of -10 is unfelt, so the regressor's 3 is lowered to the ceiling.
-        let predictor = Predictor::new(
-            one_leaf(FEATURE_COUNT, -CLASSIFIER_LEAF),
-            split_on("mj", 5.0),
-            test_support::geometry(),
-            PARAMS,
-        )
-        .expect("the predictor should be valid");
+        let predictor = new_predictor(classifier(-CLASSIFIER_LEAF), split_on("mj", 5.0))
+            .expect("the predictor should be valid");
         let results = predictor
             .predict(&HYPOCENTER, &[SITE], &Options::default())
             .expect("the call should be valid");
@@ -440,26 +479,50 @@ mod tests {
     }
 
     #[test]
-    fn rejects_forests_with_the_wrong_feature_count() {
-        let wrong = FEATURE_COUNT - 1;
-        let error = Err(ModelError::WrongFeatureCount {
-            feature_count: wrong,
-            expected: FEATURE_COUNT,
-        });
-        let classifier = Predictor::new(
-            one_leaf(wrong, CLASSIFIER_LEAF),
-            split_on("mj", 5.0),
-            test_support::geometry(),
-            PARAMS,
+    fn rejects_models_with_other_features() {
+        let mut swapped = feature_names();
+        swapped.swap(0, 1);
+        let mut longer = feature_names();
+        longer.push("extra".to_owned());
+        let shorter = feature_names()[..FEATURE_COUNT - 1].to_vec();
+        let mut padded = feature_names();
+        padded[0].push('\u{a0}');
+        let cases = [
+            (swapped, FEATURE_COUNT, 0),
+            (padded, FEATURE_COUNT, 0),
+            (longer, FEATURE_COUNT + 1, FEATURE_COUNT),
+            (shorter, FEATURE_COUNT - 1, FEATURE_COUNT - 1),
+        ];
+        for (names, feature_count, index) in cases {
+            let error = Err(ModelError::WrongFeatures { index });
+            let other = |objective| model(one_leaf(feature_count, 1.0), objective, names.clone());
+
+            let as_classifier = new_predictor(other(Objective::Binary), split_on("mj", 5.0));
+            assert_eq!(as_classifier.map(|_| ()), error, "{names:?}");
+            let as_regressor = new_predictor(classifier(1.0), other(Objective::Regression));
+            assert_eq!(as_regressor.map(|_| ()), error, "{names:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_models_with_the_wrong_objective() {
+        let classifier_as_regressor = new_predictor(classifier(1.0), classifier(1.0));
+        let regressor_as_classifier = new_predictor(split_on("mj", 5.0), split_on("mj", 5.0));
+
+        assert_eq!(
+            classifier_as_regressor.map(|_| ()),
+            Err(ModelError::WrongObjective {
+                expected: Objective::Regression,
+                found: Objective::Binary,
+            })
         );
-        assert_eq!(classifier.map(|_| ()), error);
-        let regressor = Predictor::new(
-            one_leaf(FEATURE_COUNT, CLASSIFIER_LEAF),
-            one_leaf(wrong, 1.0),
-            test_support::geometry(),
-            PARAMS,
+        assert_eq!(
+            regressor_as_classifier.map(|_| ()),
+            Err(ModelError::WrongObjective {
+                expected: Objective::Binary,
+                found: Objective::Regression,
+            })
         );
-        assert_eq!(regressor.map(|_| ()), error);
     }
 
     #[test]
@@ -470,7 +533,7 @@ mod tests {
             ..PARAMS
         };
         let predictor = Predictor::new(
-            one_leaf(FEATURE_COUNT, CLASSIFIER_LEAF),
+            classifier(CLASSIFIER_LEAF),
             split_on("mj", 5.0),
             test_support::geometry(),
             params,

@@ -72,7 +72,8 @@ fn number<T: FromStr>(file: &str, row: &Row<'_>, column: usize) -> T {
 fn load(name: &str) -> Fixture {
     let directory = fixture_directory(name);
     let forest = lightgbm_text::parse(&read(&directory, "model.txt"))
-        .unwrap_or_else(|error| panic!("{name}/model.txt: {error}"));
+        .unwrap_or_else(|error| panic!("{name}/model.txt: {error}"))
+        .into_forest();
 
     let inputs_file = format!("{name}/inputs.csv");
     let inputs_text = read(&directory, "inputs.csv");

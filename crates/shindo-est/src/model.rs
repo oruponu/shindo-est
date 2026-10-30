@@ -1,6 +1,88 @@
-//! Errors in a model or in the settings that come with it.
+//! A model: decision trees together with what their raw score means and the
+//! features they take.
 
 use std::fmt;
+
+use crate::forest::Forest;
+
+/// How a model turns its raw score, the sum of its trees, into a prediction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum Objective {
+    /// A regression that predicts its raw score.
+    Regression,
+    /// A binary classifier that predicts the logistic function of its raw
+    /// score as the probability of the positive class.
+    Binary,
+}
+
+impl fmt::Display for Objective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Regression => f.write_str("regression"),
+            Self::Binary => f.write_str("binary classification"),
+        }
+    }
+}
+
+/// Decision trees with their objective and the names of their features.
+#[derive(Clone, Debug)]
+pub struct Model {
+    forest: Forest,
+    objective: Objective,
+    feature_names: Vec<String>,
+}
+
+impl Model {
+    /// Combines trees with their objective and one name per feature, in the
+    /// order the trees take the features.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelError::FeatureNameCount`] when `feature_names` does not
+    /// have one name for each feature of `forest`.
+    pub fn new(
+        forest: Forest,
+        objective: Objective,
+        feature_names: Vec<String>,
+    ) -> Result<Self, ModelError> {
+        if feature_names.len() != forest.feature_count() {
+            return Err(ModelError::FeatureNameCount {
+                names: feature_names.len(),
+                feature_count: forest.feature_count(),
+            });
+        }
+        Ok(Self {
+            forest,
+            objective,
+            feature_names,
+        })
+    }
+
+    /// Returns the trees.
+    #[must_use]
+    pub fn forest(&self) -> &Forest {
+        &self.forest
+    }
+
+    /// Returns the trees, dropping the rest of the model.
+    #[must_use]
+    pub fn into_forest(self) -> Forest {
+        self.forest
+    }
+
+    /// Returns how the model turns its raw score into a prediction.
+    #[must_use]
+    pub fn objective(&self) -> Objective {
+        self.objective
+    }
+
+    /// Returns the names of the features, in the order the trees take them.
+    #[must_use]
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
+    }
+}
 
 /// An error in a model or in the settings that come with it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,12 +139,31 @@ pub enum ModelError {
     },
     /// A model file ends before its trees do.
     Truncated,
-    /// A model does not take the number of features that predictions compute.
-    WrongFeatureCount {
-        /// Number of features of the model.
+    /// A model's objective turns its raw score into a prediction in a way
+    /// that is not supported.
+    UnsupportedObjective {
+        /// Line number, starting at 1.
+        line: usize,
+    },
+    /// A model names a different number of features than its trees take.
+    FeatureNameCount {
+        /// Number of feature names.
+        names: usize,
+        /// Number of features the trees take.
         feature_count: usize,
-        /// Number of features that predictions compute.
-        expected: usize,
+    },
+    /// A model has another objective than its part in a prediction needs.
+    WrongObjective {
+        /// Objective the part needs.
+        expected: Objective,
+        /// Objective of the model.
+        found: Objective,
+    },
+    /// A model's features are not the ones predictions compute, in their
+    /// order.
+    WrongFeatures {
+        /// Index of the first feature that differs.
+        index: usize,
     },
     /// The hurdle settings fail [`HurdleParams::is_valid`].
     ///
@@ -101,12 +202,23 @@ impl fmt::Display for ModelError {
             Self::RepeatedKey { line } => write!(f, "line {line}: the key appears again"),
             Self::MissingKey { key } => write!(f, "the model has no {key}"),
             Self::Truncated => f.write_str("the model ends before \"end of trees\""),
-            Self::WrongFeatureCount {
+            Self::UnsupportedObjective { line } => {
+                write!(f, "line {line}: the objective is not supported")
+            }
+            Self::FeatureNameCount {
+                names,
                 feature_count,
-                expected,
             } => write!(
                 f,
-                "the model has {feature_count} features, but predictions use {expected}"
+                "the model names {names} features, but its trees take {feature_count}"
+            ),
+            Self::WrongObjective { expected, found } => write!(
+                f,
+                "the model is a {found} model, but a {expected} model is needed"
+            ),
+            Self::WrongFeatures { index } => write!(
+                f,
+                "feature {index} of the model is not the one predictions compute"
             ),
             Self::InvalidHurdleParams => f.write_str("the hurdle parameters are invalid"),
         }
@@ -114,3 +226,50 @@ impl fmt::Display for ModelError {
 }
 
 impl std::error::Error for ModelError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forest::Tree;
+
+    fn one_leaf(feature_count: usize) -> Forest {
+        let tree =
+            Tree::new(&[], &[], &[], &[], &[], &[1.0]).expect("a one-leaf tree should be valid");
+        Forest::new(feature_count, vec![tree]).expect("the forest should be valid")
+    }
+
+    fn names(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("f{index}")).collect()
+    }
+
+    #[test]
+    fn keeps_the_forest_objective_and_names() {
+        let model = Model::new(one_leaf(2), Objective::Binary, names(2))
+            .expect("the model should be valid");
+
+        assert_eq!(model.objective(), Objective::Binary);
+        assert_eq!(model.feature_names(), ["f0", "f1"]);
+        assert_eq!(model.forest().feature_count(), 2);
+        assert_eq!(model.into_forest().raw(&[0.0, 0.0]), 1.0);
+    }
+
+    #[test]
+    fn rejects_a_name_count_not_matching_the_features() {
+        for count in [1, 3] {
+            let error = Model::new(one_leaf(2), Objective::Regression, names(count)).unwrap_err();
+            assert_eq!(
+                error,
+                ModelError::FeatureNameCount {
+                    names: count,
+                    feature_count: 2,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn objectives_name_themselves() {
+        assert_eq!(Objective::Regression.to_string(), "regression");
+        assert_eq!(Objective::Binary.to_string(), "binary classification");
+    }
+}
