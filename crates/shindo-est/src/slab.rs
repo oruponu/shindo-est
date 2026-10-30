@@ -44,6 +44,7 @@ pub struct SlabGrid {
 
 /// Values of a grid interpolated at a point.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct SlabSample {
     /// Depth of the slab top in km.
     pub top_depth: f64,

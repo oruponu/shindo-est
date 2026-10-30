@@ -2,7 +2,7 @@
 
 pub mod features;
 pub mod forest;
-pub mod geodesy;
+mod geodesy;
 pub mod hurdle;
 pub mod input;
 pub mod intensity;
