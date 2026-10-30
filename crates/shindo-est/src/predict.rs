@@ -1,9 +1,10 @@
 //! Intensity prediction for one hypocenter and many sites.
 
 use crate::features::{self, FEATURE_COUNT};
-use crate::forest::{Forest, ModelError};
+use crate::forest::Forest;
 use crate::hurdle::{self, HurdleParams};
 use crate::input::{Hypocenter, Site};
+use crate::model::ModelError;
 use crate::slab::SlabGeometry;
 use crate::validate::{self, InputError, Scope};
 

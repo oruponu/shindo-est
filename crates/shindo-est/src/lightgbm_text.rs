@@ -3,7 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-use crate::forest::{Forest, ModelError, Tree};
+use crate::forest::{Forest, Tree};
+use crate::model::ModelError;
 
 /// Prefix of the line that starts a tree.
 const TREE_START: &str = "Tree=";
