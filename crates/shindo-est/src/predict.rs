@@ -8,12 +8,24 @@ use crate::model::{Model, ModelError, Objective};
 use crate::slab::SlabGeometry;
 use crate::validate::{self, InputError, Scope};
 
-/// Settings of one call to [`Predictor::predict`].
+/// Settings of one call to [`Predictor::predict`] or [`Predictor::predict_into`].
+///
+/// Start from [`Options::default`] and change what differs, so that code
+/// keeps compiling when settings are added.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Options {
     /// Amount added to the regressor's instrumental intensity, which also
     /// raises the classifier's logit by `logit_per_intensity` times it.
     pub offset: f64,
+}
+
+impl Options {
+    /// Returns the options with `offset` instead.
+    #[must_use]
+    pub fn with_offset(self, offset: f64) -> Self {
+        Self { offset, ..self }
+    }
 }
 
 /// Whether a site got an intensity.
@@ -30,6 +42,10 @@ pub enum PointStatus {
 }
 
 /// The prediction for one site.
+///
+/// [`PointResult::default`] is a result without values, marked
+/// [`PointStatus::InvalidInput`], for filling a buffer that
+/// [`Predictor::predict_into`] overwrites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct PointResult {
@@ -42,6 +58,12 @@ pub struct PointResult {
     /// The regressor's instrumental intensity before the offset, for
     /// diagnosis.
     pub regression: f64,
+}
+
+impl Default for PointResult {
+    fn default() -> Self {
+        Self::without_values(PointStatus::InvalidInput)
+    }
 }
 
 impl PointResult {
@@ -120,8 +142,37 @@ impl Predictor {
         sites: &[Site],
         options: &Options,
     ) -> Result<Vec<PointResult>, InputError> {
+        let mut results = vec![PointResult::default(); sites.len()];
+        self.predict_into(hypocenter, sites, options, &mut results)?;
+        Ok(results)
+    }
+
+    /// Writes into `out` what [`Predictor::predict`] returns, one result per
+    /// site in the order of `sites`, so that a caller can reuse its buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`InputError`] when the hypocenter or the offset is invalid,
+    /// as [`validate::check_call`] describes, and leaves `out` as it was.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` does not have the length of `sites`.
+    pub fn predict_into(
+        &self,
+        hypocenter: &Hypocenter,
+        sites: &[Site],
+        options: &Options,
+        out: &mut [PointResult],
+    ) -> Result<(), InputError> {
+        assert_eq!(
+            out.len(),
+            sites.len(),
+            "out must have one result for each of the {} sites",
+            sites.len()
+        );
         let scope = validate::check_call(hypocenter, options.offset)?;
-        let mut results = vec![PointResult::without_values(PointStatus::InvalidInput); sites.len()];
+        out.fill(PointResult::default());
         let mut rows = Vec::new();
         let mut computed = Vec::new();
         for (index, site) in sites.iter().enumerate() {
@@ -129,7 +180,7 @@ impl Predictor {
                 continue;
             }
             if scope == Scope::OutOfScope {
-                results[index].status = PointStatus::OutOfScope;
+                out[index].status = PointStatus::OutOfScope;
             } else {
                 rows.extend_from_slice(&features::compute(hypocenter, site, &self.slabs));
                 computed.push(index);
@@ -145,14 +196,14 @@ impl Predictor {
             .zip(classifier_raw.iter().zip(&regressor_raw));
         for (&index, (&classifier, &regressor)) in scores {
             let combined = hurdle::combine(classifier, regressor, options.offset, &self.hurdle);
-            results[index] = PointResult {
+            out[index] = PointResult {
                 status: PointStatus::Ok,
                 instrumental: combined.instrumental,
                 probability: combined.probability,
                 regression: regressor,
             };
         }
-        Ok(results)
+        Ok(())
     }
 }
 
@@ -549,6 +600,75 @@ mod tests {
     #[test]
     fn default_offset_is_zero() {
         assert_eq!(Options::default(), Options { offset: 0.0 });
+    }
+
+    #[test]
+    fn default_result_has_no_values() {
+        assert_without_values(&PointResult::default(), PointStatus::InvalidInput);
+    }
+
+    #[test]
+    fn with_offset_sets_the_offset() {
+        assert_eq!(Options::default().with_offset(0.2).offset, 0.2);
+    }
+
+    // A finite result that no prediction below gives, to see what is written.
+    const UNTOUCHED: PointResult = PointResult {
+        status: PointStatus::OutOfScope,
+        instrumental: -1.0,
+        probability: -1.0,
+        regression: -1.0,
+    };
+
+    #[test]
+    fn predict_into_writes_what_predict_returns() {
+        let predictor = mj_predictor();
+        let sites = [SITE, Site { arv: 0.0, ..SITE }, SITE];
+        let options = Options::default().with_offset(0.2);
+        let expected = predictor
+            .predict(&HYPOCENTER, &sites, &options)
+            .expect("the call should be valid");
+
+        let mut out = [UNTOUCHED; 3];
+        predictor
+            .predict_into(&HYPOCENTER, &sites, &options, &mut out)
+            .expect("the call should be valid");
+
+        assert_eq!(out[0], expected[0]);
+        assert_without_values(&out[1], PointStatus::InvalidInput);
+        assert_eq!(out[2], expected[2]);
+    }
+
+    #[test]
+    fn predict_into_leaves_the_output_alone_on_an_error() {
+        let wrong_latitude = Hypocenter {
+            latitude: 91.0,
+            ..HYPOCENTER
+        };
+        let mut out = [UNTOUCHED; 1];
+
+        let result =
+            mj_predictor().predict_into(&wrong_latitude, &[SITE], &Options::default(), &mut out);
+
+        assert_eq!(
+            result,
+            Err(InputError::InvalidHypocenter(HypocenterField::Latitude))
+        );
+        assert_eq!(out, [UNTOUCHED]);
+    }
+
+    #[test]
+    #[should_panic(expected = "one result for each of the 2 sites")]
+    fn predict_into_rejects_an_output_of_another_length() {
+        let mut out = [UNTOUCHED; 1];
+        let _ =
+            mj_predictor().predict_into(&HYPOCENTER, &[SITE, SITE], &Options::default(), &mut out);
+    }
+
+    #[test]
+    fn predictor_can_be_shared_between_threads() {
+        fn assert_send_and_sync<T: Send + Sync>() {}
+        assert_send_and_sync::<Predictor>();
     }
 
     #[test]
