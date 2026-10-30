@@ -42,6 +42,10 @@ pub enum ModelError {
     NoFeatures,
     /// A split is categorical; only numerical splits are supported.
     Categorical,
+    /// A split threshold is NaN.
+    NanThreshold,
+    /// A leaf value is NaN or infinite.
+    NonFiniteLeafValue,
     /// A tree is linear; only constant leaves are supported.
     Linear,
     /// The model builds more than one tree per iteration, as for several
@@ -84,6 +88,8 @@ impl fmt::Display for ModelError {
             Self::NoTrees => f.write_str("the model has no trees"),
             Self::NoFeatures => f.write_str("the model has no features"),
             Self::Categorical => f.write_str("categorical splits are not supported"),
+            Self::NanThreshold => f.write_str("a split threshold is NaN"),
+            Self::NonFiniteLeafValue => f.write_str("a leaf value is NaN or infinite"),
             Self::Linear => f.write_str("linear trees are not supported"),
             Self::MultiClass => f.write_str("models with several outputs are not supported"),
             Self::InvalidValue { line } => {
@@ -130,9 +136,10 @@ impl Tree {
     ///
     /// # Errors
     ///
-    /// Returns a [`ModelError`] when the tree has no leaves, the node arrays
-    /// are not one shorter than `leaf_value`, a child does not point to a later
-    /// node or an existing leaf, or a split is categorical.
+    /// Returns a [`ModelError`] when the tree has no leaves, a leaf value is
+    /// NaN or infinite, the node arrays are not one shorter than `leaf_value`,
+    /// a child does not point to a later node or an existing leaf, a split is
+    /// categorical, or a threshold is NaN.
     pub fn new(
         split_feature: &[u32],
         threshold: &[f64],
@@ -145,6 +152,9 @@ impl Tree {
             .len()
             .checked_sub(1)
             .ok_or(ModelError::NoLeaves)?;
+        if leaf_value.iter().any(|value| !value.is_finite()) {
+            return Err(ModelError::NonFiniteLeafValue);
+        }
         let lengths = [
             split_feature.len(),
             threshold.len(),
@@ -161,6 +171,9 @@ impl Tree {
             let decision = decision_type[index];
             if decision & CATEGORICAL_MASK != 0 {
                 return Err(ModelError::Categorical);
+            }
+            if threshold[index].is_nan() {
+                return Err(ModelError::NanThreshold);
             }
             let decode = |value: i32| child(value, index, node_count, leaf_value.len());
             nodes.push(Node {
@@ -735,6 +748,38 @@ mod tests {
                 feature_count: 1
             }
         );
+    }
+
+    #[test]
+    fn rejects_non_finite_leaf_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let tree = Tree::new(
+                &[0, 1],
+                &[1.5, 0.0],
+                &[4, 8],
+                &[-1, -2],
+                &[1, -3],
+                &[10.0, 20.0, value],
+            );
+
+            assert_eq!(tree.unwrap_err(), ModelError::NonFiniteLeafValue, "{value}");
+        }
+        let one_leaf = Tree::new(&[], &[], &[], &[], &[], &[f64::NAN]);
+        assert_eq!(one_leaf.unwrap_err(), ModelError::NonFiniteLeafValue);
+    }
+
+    #[test]
+    fn rejects_a_nan_threshold() {
+        let tree = Tree::new(
+            &[0, 1],
+            &[1.5, f64::NAN],
+            &[4, 8],
+            &[-1, -2],
+            &[1, -3],
+            &[10.0, 20.0, 30.0],
+        );
+
+        assert_eq!(tree.unwrap_err(), ModelError::NanThreshold);
     }
 
     #[test]

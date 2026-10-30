@@ -253,17 +253,11 @@ end of parameters
     }
 
     #[test]
-    fn reads_infinite_and_nan_values() {
+    fn reads_infinite_thresholds_and_exponents() {
         let infinite = parse_with("threshold=1.5 0", "threshold=inf 0")
             .expect("an infinite threshold should parse");
         assert_eq!(infinite.raw(&[1e300, 5.0]), 10.5);
 
-        for nan in ["nan", "-nan"] {
-            let forest = parse_with("leaf_value=0.5", &format!("leaf_value={nan}"))
-                .unwrap_or_else(|error| panic!("{nan} should parse: {error}"));
-            let raw = forest.raw(&[1.5, 5.0]);
-            assert!(raw.is_nan(), "{nan}: {raw}");
-        }
         let negative = parse_with("threshold=1.5 0", "threshold=-inf 0")
             .expect("a negative infinite threshold should parse");
         // -1 is above -inf, though at or below the original 1.5.
@@ -296,6 +290,25 @@ end of parameters
 
         assert_eq!(forest.feature_count(), 2);
         assert_eq!(forest.tree_count(), 2);
+    }
+
+    #[test]
+    fn rejects_non_finite_leaf_values() {
+        for value in ["nan", "-nan", "inf", "-inf"] {
+            assert_eq!(
+                parse_with("leaf_value=0.5", &format!("leaf_value={value}")).unwrap_err(),
+                ModelError::NonFiniteLeafValue,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_nan_threshold() {
+        assert_eq!(
+            parse_with("threshold=1.5 0", "threshold=nan 0").unwrap_err(),
+            ModelError::NanThreshold
+        );
     }
 
     #[test]
