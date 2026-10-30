@@ -16,6 +16,10 @@ const BOUNDARY_LATITUDE: f64 = 35.0;
 const PATH_SAMPLES: u32 = 60;
 /// Largest number of grid nodes accepted. The Kuril grid in `data/slab2` has about 155,000.
 const MAX_NODES: f64 = 4_000_000.0;
+/// Largest number of grid nodes accepted for each point, so that the memory a
+/// grid takes stays proportional to its text. The grids in `data/slab2` have
+/// 1.7 (Kuril) and 2.7 (Izu-Bonin) nodes for each point.
+const MAX_NODES_PER_POINT: usize = 16;
 /// Largest distance in nodes accepted between a point and its grid node.
 const GRID_TOLERANCE: f64 = 1e-6;
 
@@ -85,6 +89,9 @@ pub enum SlabError {
     TooSmall,
     /// The grid has more than 4,000,000 nodes, far more than any Slab2 grid.
     TooLarge,
+    /// The grid has more than 16 nodes for each point; the grids in
+    /// `data/slab2` have at most 2.7.
+    TooSparse,
 }
 
 impl fmt::Display for SlabError {
@@ -110,6 +117,10 @@ impl fmt::Display for SlabError {
             Self::NoPoints => f.write_str("the grid has no points"),
             Self::TooSmall => f.write_str("the grid is smaller than 2 x 2 nodes"),
             Self::TooLarge => f.write_str("the grid has more than 4,000,000 nodes"),
+            Self::TooSparse => write!(
+                f,
+                "the grid has more than {MAX_NODES_PER_POINT} nodes for each point"
+            ),
         }
     }
 }
@@ -142,7 +153,8 @@ impl SlabGrid {
     ///
     /// Returns a [`SlabError`] when a line is malformed, a coordinate is invalid,
     /// a point is off the 0.05 degree grid or repeats an earlier point, or the
-    /// grid is empty, smaller than 2 x 2, or too large.
+    /// grid is empty, smaller than 2 x 2, too large, or has far more nodes than
+    /// points.
     pub fn parse(text: &str) -> Result<Self, SlabError> {
         let mut points = Vec::new();
         for (index, line) in text.lines().enumerate() {
@@ -165,6 +177,9 @@ impl SlabGrid {
             return Err(SlabError::TooLarge);
         }
         let (rows, columns) = (to_index(rows), to_index(columns));
+        if rows * columns > points.len().saturating_mul(MAX_NODES_PER_POINT) {
+            return Err(SlabError::TooSparse);
+        }
 
         let mut latitudes = axis(min_latitude, rows);
         let mut longitudes = axis(min_longitude, columns);
@@ -743,6 +758,33 @@ mod tests {
             SlabGrid::parse("-180,-90,1,1\n360,90,1,1").unwrap_err(),
             SlabError::TooLarge
         );
+    }
+
+    #[test]
+    fn rejects_a_grid_far_larger_than_its_points() {
+        // Two corners 2 degrees apart span 41 x 41 nodes, but give 2 points.
+        assert_eq!(
+            SlabGrid::parse("140,35,10,1\n142,37,10,1").unwrap_err(),
+            SlabError::TooSparse
+        );
+        // Two corners spanning 4 x 8 nodes give 16 nodes for each point, the
+        // most accepted; 3 x 11 give one node more.
+        SlabGrid::parse("140,35,10,1\n140.35,35.15,10,1").expect("32 nodes should parse");
+        assert_eq!(
+            SlabGrid::parse("140,35,10,1\n140.5,35.1,10,1").unwrap_err(),
+            SlabError::TooSparse
+        );
+        // A grid of the same size with a point on every node is read.
+        let mut lines = Vec::new();
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let latitude = 35.0 + f64::from(i) * super::SPACING;
+                let longitude = 140.0 + f64::from(j) * super::SPACING;
+                lines.push(format!("{longitude},{latitude},10,1"));
+            }
+        }
+        let full = SlabGrid::parse(&lines.join("\n")).expect("a full grid should parse");
+        assert_eq!(full.sample(36.0, 141.0).top_depth, 10.0);
     }
 
     #[test]
