@@ -7,6 +7,12 @@ use crate::slab::SlabGeometry;
 /// Number of model features.
 pub const FEATURE_COUNT: usize = 14;
 
+/// Version of how [`compute`] computes the features. It goes up with any
+/// change that alters the values, so a model whose
+/// [`Manifest::feature_version`](crate::Manifest::feature_version) differs was
+/// trained on features that [`compute`] no longer produces.
+pub const FEATURE_VERSION: u32 = 1;
+
 /// Smallest hypocentral distance in km taken for `log_hypo`.
 const MIN_HYPOCENTRAL_DISTANCE: f64 = 1.0;
 
