@@ -36,7 +36,7 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
 #[must_use]
 pub fn compute(hypocenter: &Hypocenter, site: &Site, slabs: &SlabGeometry) -> [f64; FEATURE_COUNT] {
     let distances = geodesy::distances(hypocenter, site.latitude, site.longitude);
-    let azimuth = azimuth(hypocenter, site);
+    let azimuth = site_azimuth(hypocenter, site);
     // Not f64::max, which would turn a NaN distance into 1.
     let floored_hypocentral = if distances.hypocentral < MIN_HYPOCENTRAL_DISTANCE {
         MIN_HYPOCENTRAL_DISTANCE
@@ -63,7 +63,7 @@ pub fn compute(hypocenter: &Hypocenter, site: &Site, slabs: &SlabGeometry) -> [f
 
 /// Returns the azimuth in radians from the epicenter to the site, clockwise
 /// from north, using geodetic latitudes on a sphere.
-fn azimuth(hypocenter: &Hypocenter, site: &Site) -> f64 {
+fn site_azimuth(hypocenter: &Hypocenter, site: &Site) -> f64 {
     let lat1 = hypocenter.latitude.to_radians();
     let lat2 = site.latitude.to_radians();
     let delta = geodesy::longitude_difference(hypocenter.longitude, site.longitude).to_radians();
@@ -96,7 +96,7 @@ mod tests {
     }
 
     fn features(hypocenter: &Hypocenter, site: &Site) -> [f64; FEATURE_COUNT] {
-        compute(hypocenter, site, &test_support::geometry())
+        super::compute(hypocenter, site, &test_support::geometry())
     }
 
     fn feature(values: &[f64; FEATURE_COUNT], name: &str) -> f64 {
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn distances_come_from_geodesy() {
-        let hypocenter = hypocenter(35.0, 135.0, 0.0);
-        let values = features(&hypocenter, &site(36.0, 137.0));
-        let distances = geodesy::distances(&hypocenter, 36.0, 137.0);
+        let shallow = hypocenter(35.0, 135.0, 0.0);
+        let values = features(&shallow, &site(36.0, 137.0));
+        let distances = geodesy::distances(&shallow, 36.0, 137.0);
 
         assert_close(
             feature(&values, "log_hypo"),

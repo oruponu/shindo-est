@@ -210,7 +210,7 @@ impl SlabGrid {
         depth: Vec<f64>,
         thickness: Vec<f64>,
     ) -> Self {
-        let cos_dip = cos_dip(&latitudes, longitudes.len(), &depth);
+        let cos_dip = dip_cosines(&latitudes, longitudes.len(), &depth);
         Self {
             latitudes,
             longitudes,
@@ -421,7 +421,7 @@ fn cell(axis: &[f64], value: f64) -> usize {
 
 /// Returns the cosine of the slab dip at each node from the depth gradient:
 /// central differences inside the grid and one-sided differences at its edges.
-fn cos_dip(latitudes: &[f64], columns: usize, depth: &[f64]) -> Vec<f64> {
+fn dip_cosines(latitudes: &[f64], columns: usize, depth: &[f64]) -> Vec<f64> {
     let rows = latitudes.len();
     let dy = SPACING.to_radians() * EARTH_RADIUS;
     let mut result = Vec::with_capacity(depth.len());
@@ -640,7 +640,7 @@ mod tests {
 
         assert_close(
             grid.sample(60.0, 140.0).cos_dip,
-            cos_of_slope(10.0 / (node_spacing() * 60.0_f64.to_radians().cos())),
+            cos_of_slope(10.0 / (node_spacing() * libm::cos(60.0_f64.to_radians()))),
             1e-12,
         );
     }
@@ -949,12 +949,12 @@ mod tests {
     #[test]
     fn unknown_depth_gives_nan_updip_and_zero_path_fraction() {
         let geometry = test_support::geometry();
-        let hypocenter = hypocenter(36.5, 140.0, f64::NAN);
+        let unknown_depth = hypocenter(36.5, 140.0, f64::NAN);
 
-        let updip = geometry.updip_depth_difference(&hypocenter, 37.0, 141.0);
+        let updip = geometry.updip_depth_difference(&unknown_depth, 37.0, 141.0);
         assert!(updip.is_nan(), "{updip}");
         assert_close(
-            geometry.pacific_path_fraction(&hypocenter, 36.5, 140.0),
+            geometry.pacific_path_fraction(&unknown_depth, 36.5, 140.0),
             0.0,
             0.0,
         );

@@ -197,7 +197,6 @@ fn vincenty(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::input::Hypocenter;
 
     fn hypocenter(latitude: f64, longitude: f64, depth: f64) -> Hypocenter {
@@ -211,41 +210,47 @@ mod tests {
 
     #[test]
     fn at_epicenter_hypocentral_equals_depth() {
-        let d = distances(&hypocenter(35.0, 135.0, 10.0), 35.0, 135.0);
+        let distances = super::distances(&hypocenter(35.0, 135.0, 10.0), 35.0, 135.0);
 
-        assert!((d.hypocentral - 10.0).abs() <= 1e-6, "{d:?}");
-        assert!(d.epicentral.abs() <= 1e-9, "{d:?}");
+        assert!(
+            (distances.hypocentral - 10.0).abs() <= 1e-6,
+            "{distances:?}"
+        );
+        assert!(distances.epicentral.abs() <= 1e-9, "{distances:?}");
     }
 
     #[test]
     fn one_degree_north_is_about_111_km() {
-        let epicentral = distances(&hypocenter(35.0, 135.0, 0.0), 36.0, 135.0).epicentral;
+        let epicentral = super::distances(&hypocenter(35.0, 135.0, 0.0), 36.0, 135.0).epicentral;
 
         assert!((110.0..=112.0).contains(&epicentral), "{epicentral}");
     }
 
     #[test]
     fn epicentral_is_symmetric() {
-        let ab = distances(&hypocenter(35.0, 135.0, 0.0), 38.0, 141.0).epicentral;
-        let ba = distances(&hypocenter(38.0, 141.0, 0.0), 35.0, 135.0).epicentral;
+        let ab = super::distances(&hypocenter(35.0, 135.0, 0.0), 38.0, 141.0).epicentral;
+        let ba = super::distances(&hypocenter(38.0, 141.0, 0.0), 35.0, 135.0).epicentral;
 
         assert!((ab - ba).abs() <= 1e-9, "{ab} {ba}");
     }
 
     #[test]
     fn unknown_depth_gives_nan_hypocentral_only() {
-        let d = distances(&hypocenter(35.0, 135.0, f64::NAN), 36.0, 135.0);
+        let distances = super::distances(&hypocenter(35.0, 135.0, f64::NAN), 36.0, 135.0);
 
-        assert!(d.hypocentral.is_nan(), "{d:?}");
-        assert!((110.0..=112.0).contains(&d.epicentral), "{d:?}");
+        assert!(distances.hypocentral.is_nan(), "{distances:?}");
+        assert!(
+            (110.0..=112.0).contains(&distances.epicentral),
+            "{distances:?}"
+        );
     }
 
     #[test]
     fn nan_coordinates_give_nan_without_hanging() {
-        let d = distances(&hypocenter(f64::NAN, 135.0, 10.0), 36.0, 135.0);
+        let distances = super::distances(&hypocenter(f64::NAN, 135.0, 10.0), 36.0, 135.0);
 
-        assert!(d.hypocentral.is_nan(), "{d:?}");
-        assert!(d.epicentral.is_nan(), "{d:?}");
+        assert!(distances.hypocentral.is_nan(), "{distances:?}");
+        assert!(distances.epicentral.is_nan(), "{distances:?}");
     }
 
     #[test]
@@ -257,15 +262,18 @@ mod tests {
             (-90.0, 10.0, -90.0, -170.0),
         ];
         for (latitude, longitude, site_latitude, site_longitude) in cases {
-            let d = super::distances(
+            let distances = super::distances(
                 &hypocenter(latitude, longitude, 10.0),
                 site_latitude,
                 site_longitude,
             );
-            assert!(d.epicentral.abs() <= 1e-9, "{latitude}, {longitude}: {d:?}");
             assert!(
-                (d.hypocentral - 10.0).abs() <= 1e-9,
-                "{latitude}, {longitude}: {d:?}"
+                distances.epicentral.abs() <= 1e-9,
+                "{latitude}, {longitude}: {distances:?}"
+            );
+            assert!(
+                (distances.hypocentral - 10.0).abs() <= 1e-9,
+                "{latitude}, {longitude}: {distances:?}"
             );
         }
     }
@@ -332,21 +340,22 @@ mod tests {
     fn tiny_depths_give_exact_hypocentral_distances() {
         // r^2 + R^2 - 2rR cos(angle) cancels badly for these depths.
         for depth in [1e-6, 1e-4, 0.0] {
-            let d = super::distances(&hypocenter(35.0, 135.0, depth), 35.0, 135.0);
-            assert_eq!(d.hypocentral, depth, "{d:?}");
+            let distances = super::distances(&hypocenter(35.0, 135.0, depth), 35.0, 135.0);
+            assert_eq!(distances.hypocentral, depth, "{distances:?}");
         }
     }
 
     #[test]
     fn epicentral_matches_vincenty_example_on_grs80() {
-        // Geoscience Australia's Vincenty example (Flinders Peak to Buninyong, 54972.271 m on GRS80)
+        // Geoscience Australia's Vincenty example: Flinders Peak to Buninyong,
+        // 54972.271 m on GRS80.
         let flinders_peak = hypocenter(
             -(37.0 + 57.0 / 60.0 + 3.72030 / 3600.0),
             144.0 + 25.0 / 60.0 + 29.52440 / 3600.0,
             0.0,
         );
 
-        let epicentral = distances(
+        let epicentral = super::distances(
             &flinders_peak,
             -(37.0 + 39.0 / 60.0 + 10.15610 / 3600.0),
             143.0 + 55.0 / 60.0 + 35.38390 / 3600.0,

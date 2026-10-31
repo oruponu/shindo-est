@@ -470,7 +470,7 @@ end of parameters
     }
 
     #[test]
-    fn rejects_objectives_that_transform_the_raw_score() {
+    fn rejects_unsupported_objectives() {
         // None is a regression whose prediction is the raw score or a binary
         // objective whose probability is the logistic function of it.
         let values = [
