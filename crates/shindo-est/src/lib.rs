@@ -68,6 +68,7 @@
 //! # }
 //! ```
 
+pub mod bundle;
 pub mod features;
 pub mod forest;
 mod geodesy;
@@ -81,6 +82,7 @@ pub mod predict;
 pub mod slab;
 pub mod validate;
 
+pub use bundle::FormatError;
 pub use hurdle::HurdleParams;
 pub use input::{Hypocenter, Site};
 pub use intensity::IntensityClass;

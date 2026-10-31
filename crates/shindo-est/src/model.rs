@@ -26,7 +26,7 @@ impl fmt::Display for Objective {
 }
 
 /// Decision trees with their objective and the names of their features.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Model {
     forest: Forest,
     objective: Objective,

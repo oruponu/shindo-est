@@ -18,14 +18,14 @@ const MISSING_NAN: u8 = 2;
 const ZERO_THRESHOLD: f64 = 1e-35_f32 as f64;
 
 /// Where a split sends a row.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Child {
     Node(usize),
     Leaf(usize),
 }
 
 /// An internal node of a tree.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Node {
     feature: u32,
     threshold: f64,
@@ -35,8 +35,18 @@ struct Node {
     right: Child,
 }
 
+/// The arrays of a tree as `LightGBM` lays them out, which [`Tree::new`] takes.
+pub(crate) struct TreeArrays {
+    pub split_feature: Vec<u32>,
+    pub threshold: Vec<f64>,
+    pub decision_type: Vec<u8>,
+    pub left_child: Vec<i32>,
+    pub right_child: Vec<i32>,
+    pub leaf_value: Vec<f64>,
+}
+
 /// A decision tree whose splits are all numerical.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tree {
     nodes: Vec<Node>,
     leaf_values: Vec<f64>,
@@ -104,6 +114,35 @@ impl Tree {
         })
     }
 
+    /// Returns the arrays that [`Tree::new`] builds this tree from.
+    #[must_use]
+    pub(crate) fn arrays(&self) -> TreeArrays {
+        let node_count = self.nodes.len();
+        let mut arrays = TreeArrays {
+            split_feature: Vec::with_capacity(node_count),
+            threshold: Vec::with_capacity(node_count),
+            decision_type: Vec::with_capacity(node_count),
+            left_child: Vec::with_capacity(node_count),
+            right_child: Vec::with_capacity(node_count),
+            leaf_value: self.leaf_values.clone(),
+        };
+        for node in &self.nodes {
+            let default_left = if node.default_left {
+                DEFAULT_LEFT_MASK
+            } else {
+                0
+            };
+            arrays.split_feature.push(node.feature);
+            arrays.threshold.push(node.threshold);
+            arrays
+                .decision_type
+                .push((node.missing << MISSING_TYPE_SHIFT) | default_left);
+            arrays.left_child.push(encode(node.left));
+            arrays.right_child.push(encode(node.right));
+        }
+        arrays
+    }
+
     /// Returns the leaf that prepared features reach.
     fn leaf(&self, features: &[f64]) -> usize {
         if self.nodes.is_empty() {
@@ -143,6 +182,15 @@ fn child(
     Err(ModelError::InvalidChild)
 }
 
+/// Encodes a child as [`child`] decodes it.
+fn encode(child: Child) -> i32 {
+    let to_i32 = |index: usize| i32::try_from(index).expect("children were decoded from i32");
+    match child {
+        Child::Node(index) => to_i32(index),
+        Child::Leaf(leaf) => !to_i32(leaf),
+    }
+}
+
 /// Returns the child a node sends a prepared value to, as in `LightGBM`'s
 /// `Tree::NumericalDecision`.
 fn next(node: &Node, value: f64) -> Child {
@@ -178,7 +226,7 @@ fn prepare(value: f64) -> f64 {
 }
 
 /// Trees whose leaf values add up to a raw score.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Forest {
     feature_count: usize,
     trees: Vec<Tree>,
@@ -224,6 +272,12 @@ impl Forest {
     #[must_use]
     pub fn tree_count(&self) -> usize {
         self.trees.len()
+    }
+
+    /// Returns the trees, in the order they are added.
+    #[must_use]
+    pub(crate) fn trees(&self) -> &[Tree] {
+        &self.trees
     }
 
     /// Returns the sum of the leaf values that one row reaches, adding the
@@ -328,6 +382,40 @@ mod tests {
         )
         .expect("the tree should be valid");
         Forest::new(1, vec![tree]).expect("the forest should be valid")
+    }
+
+    #[test]
+    fn arrays_rebuild_the_same_tree() {
+        let default_left = one_split(
+            -1.0,
+            (MISSING_ZERO << MISSING_TYPE_SHIFT) | DEFAULT_LEFT_MASK,
+        );
+        let forests = [two_trees(), default_left];
+        for forest in &forests {
+            for tree in forest.trees() {
+                let arrays = tree.arrays();
+                let rebuilt = Tree::new(
+                    &arrays.split_feature,
+                    &arrays.threshold,
+                    &arrays.decision_type,
+                    &arrays.left_child,
+                    &arrays.right_child,
+                    &arrays.leaf_value,
+                )
+                .expect("the arrays should make a valid tree");
+                assert_eq!(&rebuilt, tree);
+            }
+        }
+    }
+
+    #[test]
+    fn arrays_keep_negative_zero_bits() {
+        let tree = Tree::new(&[0], &[-0.0], &[0], &[-1], &[-2], &[-0.0, 1.0])
+            .expect("the tree should be valid");
+        let arrays = tree.arrays();
+
+        assert_eq!(arrays.threshold[0].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(arrays.leaf_value[0].to_bits(), (-0.0_f64).to_bits());
     }
 
     #[test]
