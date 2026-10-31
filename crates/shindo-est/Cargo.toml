@@ -8,6 +8,10 @@ publish = false
 [dependencies]
 libm = "0.2.16"
 
+[[bench]]
+name = "predict"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
