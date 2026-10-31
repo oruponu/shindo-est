@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::hint;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -451,12 +452,17 @@ fn main() {
         HURDLE,
     )
     .expect("the predictor should be valid");
-    let options = Options::default();
+    let one_thread = Options::default().with_max_threads(NonZeroUsize::MIN);
     let mut results = vec![PointResult::default(); sites.len()];
-    measure("predict", || {
-        predictor
-            .predict_into(&HYPOCENTER, hint::black_box(&sites), &options, &mut results)
-            .expect("the hypocenter should be valid");
-        hint::black_box(&results);
-    });
+    for (name, options) in [
+        ("predict (1 thread)", one_thread),
+        ("predict (auto)", Options::default()),
+    ] {
+        measure(name, || {
+            predictor
+                .predict_into(&HYPOCENTER, hint::black_box(&sites), &options, &mut results)
+                .expect("the hypocenter should be valid");
+            hint::black_box(&results);
+        });
+    }
 }

@@ -1,5 +1,10 @@
 //! Intensity prediction for one hypocenter and many sites.
 
+use std::num::NonZeroUsize;
+use std::panic;
+use std::sync::OnceLock;
+use std::thread::{self, ScopedJoinHandle};
+
 use crate::features::{self, FEATURE_COUNT, FEATURE_NAMES};
 use crate::forest::Forest;
 use crate::hurdle::{self, HurdleParams};
@@ -18,6 +23,15 @@ pub struct Options {
     /// Amount added to the regressor's instrumental intensity, which also
     /// raises the classifier's logit by `logit_per_intensity` times it.
     pub offset: f64,
+    /// Largest number of threads the call uses, counting the calling thread,
+    /// or `None` for the number of logical CPUs the system reports, asked
+    /// once per process and taken as 1 where it is unknown, as on wasm32.
+    ///
+    /// A call uses one thread for every 256 sites or part of them, up to this
+    /// number, so `Some(1)` starts no thread. A chunk whose thread cannot be
+    /// started is predicted on the calling thread. The results do not depend
+    /// on the number of threads.
+    pub max_threads: Option<NonZeroUsize>,
 }
 
 impl Options {
@@ -26,6 +40,35 @@ impl Options {
     pub fn with_offset(self, offset: f64) -> Self {
         Self { offset, ..self }
     }
+
+    /// Returns the options with at most `threads` threads instead.
+    #[must_use]
+    pub fn with_max_threads(self, threads: NonZeroUsize) -> Self {
+        Self {
+            max_threads: Some(threads),
+            ..self
+        }
+    }
+}
+
+/// Sites for which a call uses one more thread, so that a small call does
+/// not pay for starting threads.
+const SITES_PER_THREAD: usize = 256;
+
+fn thread_count(sites: usize, max_threads: usize) -> usize {
+    max_threads.min(sites.div_ceil(SITES_PER_THREAD)).max(1)
+}
+
+/// Returns the number of logical CPUs, or 1 where it is unknown, as on
+/// wasm32.
+fn automatic_threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| thread::available_parallelism().map_or(1, NonZeroUsize::get))
+}
+
+struct SpawnedChunk<'scope, 'out> {
+    handle: ScopedJoinHandle<'scope, Vec<PointResult>>,
+    out: &'out mut [PointResult],
 }
 
 /// Whether a site got an intensity.
@@ -150,6 +193,9 @@ impl Predictor {
     /// Writes into `out` what [`Predictor::predict`] returns, one result per
     /// site in the order of `sites`, so that a caller can reuse its buffer.
     ///
+    /// The sites are split among up to [`Options::max_threads`] threads, and
+    /// the results are the same, bit for bit, whatever the number of threads.
+    ///
     /// # Errors
     ///
     /// Returns an [`InputError`] when the hypocenter or the offset is invalid,
@@ -171,7 +217,73 @@ impl Predictor {
             "out must have one result for each of the {} sites",
             sites.len()
         );
-        let scope = validate::check_call(hypocenter, options.offset)?;
+        let call_scope = validate::check_call(hypocenter, options.offset)?;
+        if sites.is_empty() {
+            return Ok(());
+        }
+        let max_threads = options
+            .max_threads
+            .map_or_else(automatic_threads, NonZeroUsize::get);
+        let chunk_size = sites.len().div_ceil(thread_count(sites.len(), max_threads));
+        let mut chunks = sites.chunks(chunk_size).zip(out.chunks_mut(chunk_size));
+        let first = chunks.next();
+        thread::scope(|threads| {
+            let mut spawned: Vec<SpawnedChunk<'_, '_>> = Vec::new();
+            for (chunk_sites, chunk_out) in chunks {
+                let predict_on_thread = move || {
+                    let mut results = vec![PointResult::default(); chunk_sites.len()];
+                    self.predict_chunk(
+                        hypocenter,
+                        chunk_sites,
+                        call_scope,
+                        options.offset,
+                        &mut results,
+                    );
+                    results
+                };
+                match thread::Builder::new().spawn_scoped(threads, predict_on_thread) {
+                    Ok(handle) => spawned.push(SpawnedChunk {
+                        handle,
+                        out: chunk_out,
+                    }),
+                    Err(_) => self.predict_chunk(
+                        hypocenter,
+                        chunk_sites,
+                        call_scope,
+                        options.offset,
+                        chunk_out,
+                    ),
+                }
+            }
+            if let Some((chunk_sites, chunk_out)) = first {
+                self.predict_chunk(
+                    hypocenter,
+                    chunk_sites,
+                    call_scope,
+                    options.offset,
+                    chunk_out,
+                );
+            }
+            for chunk in spawned {
+                match chunk.handle.join() {
+                    Ok(results) => chunk.out.copy_from_slice(&results),
+                    Err(payload) => panic::resume_unwind(payload),
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Predicts `sites` into `out` for a call already checked to have
+    /// `call_scope`.
+    fn predict_chunk(
+        &self,
+        hypocenter: &Hypocenter,
+        sites: &[Site],
+        call_scope: Scope,
+        offset: f64,
+        out: &mut [PointResult],
+    ) {
         out.fill(PointResult::default());
         let mut rows = Vec::new();
         let mut computed = Vec::new();
@@ -179,7 +291,7 @@ impl Predictor {
             if !validate::site_is_valid(site) {
                 continue;
             }
-            if scope == Scope::OutOfScope {
+            if call_scope == Scope::OutOfScope {
                 out[index].status = PointStatus::OutOfScope;
             } else {
                 rows.extend_from_slice(&features::compute(hypocenter, site, &self.slabs));
@@ -195,7 +307,7 @@ impl Predictor {
             .iter()
             .zip(classifier_raw.iter().zip(&regressor_raw));
         for (&index, (&classifier, &regressor)) in scores {
-            let combined = hurdle::combine(classifier, regressor, options.offset, &self.hurdle);
+            let combined = hurdle::combine(classifier, regressor, offset, &self.hurdle);
             out[index] = PointResult {
                 status: PointStatus::Ok,
                 instrumental: combined.instrumental,
@@ -203,7 +315,6 @@ impl Predictor {
                 regression: regressor,
             };
         }
-        Ok(())
     }
 }
 
@@ -230,6 +341,85 @@ fn check_model(model: &Model, objective: Objective) -> Result<(), ModelError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::features::{FEATURE_COUNT, FEATURE_NAMES};
+    use crate::forest::{Forest, Tree};
+    use crate::input::Site;
+    use crate::model::{Model, Objective};
+
+    const INVALID_SITE_PERIOD: usize = 97;
+
+    fn feature_index(name: &str) -> u32 {
+        let index = FEATURE_NAMES
+            .iter()
+            .position(|&candidate| candidate == name)
+            .expect("the name should be a feature");
+        u32::try_from(index).expect("the index should fit in u32")
+    }
+
+    fn split(name: &str, threshold: f64, left: f64, right: f64) -> Tree {
+        Tree::new(
+            &[feature_index(name)],
+            &[threshold],
+            &[0],
+            &[-1],
+            &[-2],
+            &[left, right],
+        )
+        .expect("the tree should be valid")
+    }
+
+    fn model(trees: Vec<Tree>, objective: Objective) -> Model {
+        let forest = Forest::new(FEATURE_COUNT, trees).expect("the forest should be valid");
+        let names: Vec<String> = FEATURE_NAMES.map(String::from).to_vec();
+        Model::new(forest, objective, names).expect("the model should be valid")
+    }
+
+    /// Returns a classifier whose logit is 1 within 200 km of the epicenter
+    /// and -3 beyond.
+    pub fn classifier() -> Model {
+        model(vec![split("epi", 200.0, 1.0, -3.0)], Objective::Binary)
+    }
+
+    /// Returns a regressor that depends on the site latitude and longitude and
+    /// the epicentral distance, so that results written to the wrong site give
+    /// other values.
+    pub fn regressor() -> Model {
+        let trees = vec![
+            split("slat", 36.0, 1.0, 2.0),
+            split("slon", 140.0, 0.1, 0.2),
+            split("epi", 100.0, 0.01, 0.02),
+        ];
+        model(trees, Objective::Regression)
+    }
+
+    /// Returns `count` sites along a line from 33 N 137 E toward the
+    /// northeast. Every 97th site, starting with the first, has an invalid ARV
+    /// of 0.
+    pub fn sites(count: usize) -> Vec<Site> {
+        let mut sites = Vec::with_capacity(count);
+        let mut latitude = 33.0;
+        let mut longitude = 137.0;
+        for index in 0..count {
+            let arv = if is_invalid(index) { 0.0 } else { 1.0 };
+            sites.push(Site {
+                latitude,
+                longitude,
+                arv,
+            });
+            latitude += 0.01;
+            longitude += 0.007;
+        }
+        sites
+    }
+
+    /// Returns whether the site at `index` of [`sites`] has an invalid ARV.
+    pub fn is_invalid(index: usize) -> bool {
+        index.is_multiple_of(INVALID_SITE_PERIOD)
+    }
 }
 
 #[cfg(test)]
@@ -393,7 +583,11 @@ mod tests {
     fn reports_regression_before_offset() {
         let offset = 0.2;
         let results = mj_predictor()
-            .predict(&HYPOCENTER, &[SITE], &Options { offset })
+            .predict(
+                &HYPOCENTER,
+                &[SITE],
+                &Options::default().with_offset(offset),
+            )
             .expect("the call should be valid");
 
         let result = results[0];
@@ -490,7 +684,11 @@ mod tests {
             Err(InputError::InvalidHypocenter(HypocenterField::Latitude))
         );
         assert_eq!(
-            predictor.predict(&HYPOCENTER, &[SITE], &Options { offset: f64::NAN }),
+            predictor.predict(
+                &HYPOCENTER,
+                &[SITE],
+                &Options::default().with_offset(f64::NAN)
+            ),
             Err(InputError::InvalidOffset)
         );
         // The call is checked even without sites.
@@ -599,7 +797,13 @@ mod tests {
 
     #[test]
     fn default_offset_is_zero() {
-        assert_eq!(Options::default(), Options { offset: 0.0 });
+        assert_eq!(
+            Options::default(),
+            Options {
+                offset: 0.0,
+                max_threads: None,
+            }
+        );
     }
 
     #[test]
@@ -663,6 +867,169 @@ mod tests {
         let mut out = [UNTOUCHED; 1];
         let _ =
             mj_predictor().predict_into(&HYPOCENTER, &[SITE, SITE], &Options::default(), &mut out);
+    }
+
+    fn threads(count: usize) -> NonZeroUsize {
+        NonZeroUsize::new(count).expect("the thread count should be positive")
+    }
+
+    fn many_site_predictor() -> Predictor {
+        Predictor::new(
+            super::test_support::classifier(),
+            super::test_support::regressor(),
+            test_support::geometry(),
+            PARAMS,
+        )
+        .expect("the predictor should be valid")
+    }
+
+    fn predict_with_threads(
+        predictor: &Predictor,
+        hypocenter: &Hypocenter,
+        sites: &[Site],
+        max_threads: usize,
+    ) -> Vec<PointResult> {
+        let options = Options::default().with_max_threads(threads(max_threads));
+        predictor
+            .predict(hypocenter, sites, &options)
+            .expect("the call should be valid")
+    }
+
+    /// Asserts that two calls gave the same bits; `call` names the call that
+    /// gave `actual`.
+    fn assert_same_bits(actual: &[PointResult], expected: &[PointResult], call: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{call}: one result for each site"
+        );
+        let pairs = actual.iter().zip(expected).enumerate();
+        for (index, (result, reference)) in pairs {
+            let same = result.status == reference.status
+                && result.instrumental.to_bits() == reference.instrumental.to_bits()
+                && result.probability.to_bits() == reference.probability.to_bits()
+                && result.regression.to_bits() == reference.regression.to_bits();
+            assert!(
+                same,
+                "{call}, site {index}: {result:?}, expected {reference:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_count_adds_a_thread_for_every_256_sites() {
+        assert_eq!(super::thread_count(0, 8), 1);
+        assert_eq!(super::thread_count(256, 8), 1);
+        assert_eq!(super::thread_count(257, 8), 2);
+        assert_eq!(super::thread_count(4400, 24), 18);
+        assert_eq!(super::thread_count(4400, 4), 4);
+        assert_eq!(super::thread_count(10, 1), 1);
+    }
+
+    #[test]
+    fn results_do_not_depend_on_the_thread_count() {
+        let predictor = many_site_predictor();
+        let sites = super::test_support::sites(1000);
+        let sequential = predict_with_threads(&predictor, &HYPOCENTER, &sites, 1);
+
+        let mut distinct: Vec<u64> = Vec::new();
+        for result in &sequential {
+            if result.status == PointStatus::Ok {
+                distinct.push(result.instrumental.to_bits());
+            }
+        }
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() >= 4, "{} distinct values", distinct.len());
+
+        for max_threads in [2, 3, 8] {
+            let threaded = predict_with_threads(&predictor, &HYPOCENTER, &sites, max_threads);
+            assert_same_bits(&threaded, &sequential, &format!("{max_threads} threads"));
+        }
+    }
+
+    #[test]
+    fn chunk_boundaries_keep_site_order() {
+        let predictor = many_site_predictor();
+        for count in [255, 256, 257, 513] {
+            let sites = super::test_support::sites(count);
+            let sequential = predict_with_threads(&predictor, &HYPOCENTER, &sites, 1);
+            let threaded = predict_with_threads(&predictor, &HYPOCENTER, &sites, 4);
+            assert_same_bits(
+                &threaded,
+                &sequential,
+                &format!("{count} sites on 4 threads"),
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_scope_reaches_every_chunk() {
+        let unknown_depth = Hypocenter {
+            depth: f64::NAN,
+            ..HYPOCENTER
+        };
+        let sites = super::test_support::sites(600);
+        let results = predict_with_threads(&many_site_predictor(), &unknown_depth, &sites, 3);
+
+        for (index, result) in results.iter().enumerate() {
+            let expected = if super::test_support::is_invalid(index) {
+                PointStatus::InvalidInput
+            } else {
+                PointStatus::OutOfScope
+            };
+            assert_without_values(result, expected);
+        }
+    }
+
+    #[test]
+    fn no_sites_with_threads() {
+        let predictor = many_site_predictor();
+        let options = Options::default().with_max_threads(threads(4));
+        assert_eq!(
+            predictor.predict_into(&HYPOCENTER, &[], &options, &mut []),
+            Ok(())
+        );
+
+        let wrong_latitude = Hypocenter {
+            latitude: 91.0,
+            ..HYPOCENTER
+        };
+        assert_eq!(
+            predictor.predict_into(&wrong_latitude, &[], &options, &mut []),
+            Err(InputError::InvalidHypocenter(HypocenterField::Latitude))
+        );
+    }
+
+    #[test]
+    fn errors_leave_out_untouched_with_threads() {
+        let wrong_latitude = Hypocenter {
+            latitude: 91.0,
+            ..HYPOCENTER
+        };
+        let sites = super::test_support::sites(600);
+        let mut out = vec![UNTOUCHED; sites.len()];
+        let options = Options::default().with_max_threads(threads(4));
+
+        let result =
+            many_site_predictor().predict_into(&wrong_latitude, &sites, &options, &mut out);
+
+        assert_eq!(
+            result,
+            Err(InputError::InvalidHypocenter(HypocenterField::Latitude))
+        );
+        assert!(out.iter().all(|&result| result == UNTOUCHED), "{out:?}");
+    }
+
+    #[test]
+    fn max_threads_defaults_to_automatic() {
+        assert_eq!(Options::default().max_threads, None);
+
+        let options = Options::default()
+            .with_offset(0.2)
+            .with_max_threads(threads(3));
+        assert_eq!(options.max_threads, Some(threads(3)));
+        assert_eq!(options.offset, 0.2);
     }
 
     #[test]
