@@ -2,6 +2,7 @@
 //! derived from them.
 
 use std::fmt;
+use std::ops::RangeInclusive;
 
 use crate::input::Hypocenter;
 
@@ -15,11 +16,15 @@ const BOUNDARY_LATITUDE: f64 = 35.0;
 /// Number of equal segments of a path whose midpoints are tested.
 const PATH_SAMPLES: u32 = 60;
 /// Largest number of grid nodes accepted. The Kuril grid in `data/slab2` has about 155,000.
-const MAX_NODES: f64 = 4_000_000.0;
+pub(crate) const MAX_NODES: u32 = 4_000_000;
 /// Largest number of grid nodes accepted for each point, so that the memory a
 /// grid takes stays proportional to its text. The grids in `data/slab2` have
 /// 1.7 (Kuril) and 2.7 (Izu-Bonin) nodes for each point.
 const MAX_NODES_PER_POINT: usize = 16;
+/// Latitudes accepted, in degrees.
+const LATITUDE_RANGE: RangeInclusive<f64> = -90.0..=90.0;
+/// Longitudes accepted, in degrees. Slab2 grids may run from 0 to 360.
+const LONGITUDE_RANGE: RangeInclusive<f64> = -180.0..=360.0;
 /// Largest distance in nodes accepted between a point and its grid node.
 const GRID_TOLERANCE: f64 = 1e-6;
 
@@ -74,7 +79,9 @@ pub enum SlabError {
         /// Line number, starting at 1.
         line: usize,
     },
-    /// The point is not on the 0.05 degree grid of the other points.
+    /// The point is not on the 0.05 degree grid of the other points, or its
+    /// latitude or longitude differs from that of an earlier point in its row
+    /// or column.
     NotOnGrid {
         /// Line number, starting at 1.
         line: usize,
@@ -153,9 +160,9 @@ impl SlabGrid {
     /// # Errors
     ///
     /// Returns a [`SlabError`] when a line is malformed, a coordinate is invalid,
-    /// a point is off the 0.05 degree grid or repeats an earlier point, or the
-    /// grid is empty, smaller than 2 x 2, too large, or has far more nodes than
-    /// points.
+    /// a point is off the 0.05 degree grid, differs from its row or column, or
+    /// repeats an earlier point, or the grid is empty, smaller than 2 x 2, too
+    /// large, or has far more nodes than points.
     pub fn parse(text: &str) -> Result<Self, SlabError> {
         let mut points = Vec::new();
         for (index, line) in text.lines().enumerate() {
@@ -174,7 +181,7 @@ impl SlabGrid {
         if rows < 2.0 || columns < 2.0 {
             return Err(SlabError::TooSmall);
         }
-        if rows * columns > MAX_NODES {
+        if rows * columns > f64::from(MAX_NODES) {
             return Err(SlabError::TooLarge);
         }
         let (rows, columns) = (to_index(rows), to_index(columns));
@@ -182,8 +189,8 @@ impl SlabGrid {
             return Err(SlabError::TooSparse);
         }
 
-        let mut latitudes = axis(min_latitude, rows);
-        let mut longitudes = axis(min_longitude, columns);
+        let mut latitudes: Vec<Option<f64>> = vec![None; rows];
+        let mut longitudes: Vec<Option<f64>> = vec![None; columns];
         let mut depth = vec![f64::NAN; rows * columns];
         let mut thickness = vec![f64::NAN; rows * columns];
         let mut filled = vec![false; rows * columns];
@@ -196,12 +203,69 @@ impl SlabGrid {
                 return Err(SlabError::RepeatedPoint { line: point.line });
             }
             filled[node] = true;
-            latitudes[i] = point.latitude;
-            longitudes[j] = point.longitude;
+            // Every point of a row or column has the coordinate of its first
+            // point, so the first row and column have the smallest ones and
+            // `from_nodes` checks the axes as this loop checked the points.
+            if !record_coordinate(&mut latitudes[i], point.latitude)
+                || !record_coordinate(&mut longitudes[j], point.longitude)
+            {
+                return Err(not_on_grid);
+            }
             depth[node] = point.depth;
             thickness[node] = point.thickness;
         }
-        Ok(Self::new(latitudes, longitudes, depth, thickness))
+        Ok(Self::new(
+            complete_axis(&latitudes, min_latitude),
+            complete_axis(&longitudes, min_longitude),
+            depth,
+            thickness,
+        ))
+    }
+
+    /// Builds a grid from its axes and row-major nodes, one row per latitude,
+    /// as [`SlabGrid::parse`] would. Returns `None` unless there are at least 2
+    /// rows and 2 columns, `depth` and `thickness` have a value for each node,
+    /// and each axis is finite, in range, and rises from its first value along
+    /// the 0.05 degree grid.
+    #[must_use]
+    pub(crate) fn from_nodes(
+        latitudes: Vec<f64>,
+        longitudes: Vec<f64>,
+        depth: Vec<f64>,
+        thickness: Vec<f64>,
+    ) -> Option<Self> {
+        let nodes = latitudes.len().checked_mul(longitudes.len());
+        let valid = latitudes.len() >= 2
+            && longitudes.len() >= 2
+            && nodes == Some(depth.len())
+            && nodes == Some(thickness.len())
+            && on_grid(&latitudes, LATITUDE_RANGE)
+            && on_grid(&longitudes, LONGITUDE_RANGE);
+        valid.then(|| Self::new(latitudes, longitudes, depth, thickness))
+    }
+
+    /// Returns the latitudes of the rows.
+    #[must_use]
+    pub(crate) fn latitudes(&self) -> &[f64] {
+        &self.latitudes
+    }
+
+    /// Returns the longitudes of the columns.
+    #[must_use]
+    pub(crate) fn longitudes(&self) -> &[f64] {
+        &self.longitudes
+    }
+
+    /// Returns the depth of each node, row by row.
+    #[must_use]
+    pub(crate) fn depth(&self) -> &[f64] {
+        &self.depth
+    }
+
+    /// Returns the thickness of each node, row by row.
+    #[must_use]
+    pub(crate) fn thickness(&self) -> &[f64] {
+        &self.thickness
     }
 
     fn new(
@@ -330,6 +394,26 @@ impl SlabGeometry {
         f64::from(inside) / f64::from(PATH_SAMPLES)
     }
 
+    /// Returns the Kuril grid.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the model file writer that uses it comes next")
+    )]
+    pub(crate) fn kuril(&self) -> &SlabGrid {
+        &self.kuril
+    }
+
+    /// Returns the Izu-Bonin grid.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the model file writer that uses it comes next")
+    )]
+    pub(crate) fn izu_bonin(&self) -> &SlabGrid {
+        &self.izu_bonin
+    }
+
     fn pacific(&self, latitude: f64) -> &SlabGrid {
         if latitude >= BOUNDARY_LATITUDE {
             &self.kuril
@@ -375,7 +459,7 @@ fn parse_point(line: &str, line_number: usize) -> Result<Point, SlabError> {
         thickness: number(thickness)?,
     };
     // Range checks are false for NaN, so NaN coordinates are rejected too.
-    if !((-90.0..=90.0).contains(&point.latitude) && (-180.0..=360.0).contains(&point.longitude)) {
+    if !(LATITUDE_RANGE.contains(&point.latitude) && LONGITUDE_RANGE.contains(&point.longitude)) {
         return Err(SlabError::InvalidCoordinate { line: line_number });
     }
     Ok(point)
@@ -402,6 +486,38 @@ fn grid_index(offset: f64) -> Option<usize> {
     let nodes = offset / SPACING;
     let rounded = nodes.round();
     ((nodes - rounded).abs() <= GRID_TOLERANCE).then(|| to_index(rounded))
+}
+
+/// Returns whether every value of `axis` is in `range` and lies on the grid
+/// from the first value, node after node.
+fn on_grid(axis: &[f64], range: RangeInclusive<f64>) -> bool {
+    let Some(&first) = axis.first() else {
+        return false;
+    };
+    for (k, value) in axis.iter().enumerate() {
+        let offset = value - first;
+        // Range checks are false for NaN, so NaN values are rejected too.
+        if !range.contains(value) || offset < 0.0 || grid_index(offset) != Some(k) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Gives an axis node the coordinate `value` if no point has given it one, and
+/// returns whether the node has exactly that coordinate.
+fn record_coordinate(node: &mut Option<f64>, value: f64) -> bool {
+    node.get_or_insert(value).to_bits() == value.to_bits()
+}
+
+/// Returns the coordinates of an axis, with nodes no point gave one a whole
+/// number of grid spacings from `min`.
+fn complete_axis(coordinates: &[Option<f64>], min: f64) -> Vec<f64> {
+    coordinates
+        .iter()
+        .zip(axis(min, coordinates.len()))
+        .map(|(&coordinate, computed)| coordinate.unwrap_or(computed))
+        .collect()
 }
 
 /// Returns `count` values from `min` at the grid spacing.
@@ -746,6 +862,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_point_off_its_row_or_column() {
+        // Each point is within the tolerance of the grid from the smallest
+        // coordinates, but a later point gives row 0, then column 1, a
+        // coordinate other than that of the first point there.
+        assert_eq!(
+            SlabGrid::parse("140,35,10,1\n140.05,35.00000004,10,1\n140,35.04999996,10,1")
+                .unwrap_err(),
+            SlabError::NotOnGrid { line: 2 }
+        );
+        assert_eq!(
+            SlabGrid::parse("140,35,10,1\n140.05,35,10,1\n140.05000004,35.05,10,1").unwrap_err(),
+            SlabError::NotOnGrid { line: 3 }
+        );
+    }
+
+    #[test]
+    fn axes_keep_the_coordinates_of_the_points() {
+        // 0.15 is not 0 plus three spacings in f64, and no point is at 0.05
+        // or 0.1.
+        let grid = SlabGrid::parse("0,35,10,1\n0.15,35,10,1\n0,35.05,10,1")
+            .expect("the grid should parse");
+        assert_eq!(grid.longitudes(), [0.0, 0.05, 0.1, 0.15]);
+    }
+
+    #[test]
     fn rejects_a_repeated_point() {
         assert_eq!(
             SlabGrid::parse(&format!("{FOUR_NODES}\n140,35,10,1")).unwrap_err(),
@@ -810,6 +951,40 @@ mod tests {
             depth,
             magnitude: 6.0,
         }
+    }
+
+    #[test]
+    fn from_nodes_needs_two_rows_and_columns() {
+        let one_row =
+            SlabGrid::from_nodes(vec![35.0], vec![140.0, 140.05], vec![1.0; 2], vec![1.0; 2]);
+        assert!(one_row.is_none(), "1 row");
+        let one_column =
+            SlabGrid::from_nodes(vec![35.0, 35.05], vec![140.0], vec![1.0; 2], vec![1.0; 2]);
+        assert!(one_column.is_none(), "1 column");
+    }
+
+    #[test]
+    fn from_nodes_needs_a_value_for_each_node() {
+        let grid = |depth_count: usize, thickness_count: usize| {
+            SlabGrid::from_nodes(
+                vec![35.0, 35.05],
+                vec![140.0, 140.05],
+                vec![10.0; depth_count],
+                vec![1.0; thickness_count],
+            )
+        };
+
+        assert!(grid(4, 4).is_some(), "4 values for 4 nodes");
+        assert!(grid(3, 4).is_none(), "3 depths");
+        assert!(grid(4, 5).is_none(), "5 thicknesses");
+    }
+
+    #[test]
+    fn geometry_returns_its_grids() {
+        let geometry = test_support::geometry();
+
+        assert_eq!(geometry.kuril().latitudes()[0], 35.0);
+        assert_eq!(geometry.izu_bonin().latitudes()[0], 32.0);
     }
 
     #[test]

@@ -29,11 +29,11 @@ pub(crate) fn write(writer: &mut Writer, objective: Objective, forest: &Forest) 
         Objective::Regression => REGRESSION,
         Objective::Binary => BINARY,
     });
-    writer.u32(to_u32(forest.feature_count()));
-    writer.u32(to_u32(forest.tree_count()));
+    writer.u32(codec::to_u32(forest.feature_count()));
+    writer.u32(codec::to_u32(forest.tree_count()));
     for tree in forest.trees() {
         let arrays = tree.arrays();
-        writer.u32(to_u32(arrays.leaf_value.len()));
+        writer.u32(codec::to_u32(arrays.leaf_value.len()));
         writer.u32s(&arrays.split_feature);
         writer.f64s(&arrays.threshold);
         writer.u8s(&arrays.decision_type);
@@ -94,10 +94,6 @@ fn read_tree(reader: &mut Reader<'_>) -> Result<Tree, FormatError> {
         &leaf_value,
     )
     .map_err(FormatError::Model)
-}
-
-fn to_u32(count: usize) -> u32 {
-    u32::try_from(count).expect("counts in a model should fit in u32")
 }
 
 #[cfg(test)]

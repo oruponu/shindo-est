@@ -14,6 +14,11 @@ mod codec;
     expect(dead_code, reason = "the model file reader and writer come next")
 )]
 mod forest_section;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the model file reader and writer come next")
+)]
+mod grid_section;
 
 /// An error in the bytes of a model file.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,6 +41,9 @@ pub enum FormatError {
     },
     /// A model in the file is invalid.
     Model(ModelError),
+    /// A slab grid in the file is invalid: too small, or with an axis off the
+    /// 0.05 degree grid or out of range.
+    InvalidGrid,
 }
 
 impl fmt::Display for FormatError {
@@ -51,6 +59,7 @@ impl fmt::Display for FormatError {
             }
             // The model error is the source, so it is not repeated here.
             Self::Model(_) => f.write_str("the model file has an invalid model"),
+            Self::InvalidGrid => f.write_str("the model file has an invalid slab grid"),
         }
     }
 }

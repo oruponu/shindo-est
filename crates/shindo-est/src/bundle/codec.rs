@@ -8,6 +8,16 @@ pub(crate) fn to_usize(value: u64) -> Result<usize, FormatError> {
     usize::try_from(value).map_err(|_| FormatError::Truncated)
 }
 
+/// Converts a count to the `u32` that files store it in.
+///
+/// # Panics
+///
+/// Panics if `count` does not fit in `u32`.
+#[must_use]
+pub(crate) fn to_u32(count: usize) -> u32 {
+    u32::try_from(count).expect("counts in a model file should fit in u32")
+}
+
 /// Reads values from the front of a byte slice.
 pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
