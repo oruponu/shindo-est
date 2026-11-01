@@ -534,7 +534,8 @@ mod tests {
             [result.instrumental, result.probability, result.regression].map(f64::to_bits)
         };
         assert_eq!(actual.len(), expected.len());
-        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        let pairs = actual.iter().zip(expected);
+        for (index, (actual, expected)) in pairs.enumerate() {
             assert_eq!(actual.status, expected.status, "site {index}");
             assert_eq!(bits(actual), bits(expected), "site {index}");
         }
