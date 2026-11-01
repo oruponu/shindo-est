@@ -3,7 +3,8 @@
 //! A [`Predictor`] combines a felt classifier and an intensity regressor,
 //! read from `LightGBM`'s text format, with the Slab2 grids of the Pacific
 //! slab and the hurdle settings, and predicts the instrumental intensity at
-//! many sites for one hypocenter.
+//! many sites for one hypocenter. A model file holds all of these in one
+//! binary file, and the [`ModelBundle`] read from it gives the predictor.
 //!
 //! # Examples
 //!

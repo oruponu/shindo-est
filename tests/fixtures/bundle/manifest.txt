@@ -1,0 +1,11 @@
+model_id=synthetic-fixture
+feature_version=1
+feature_names=mj depth qlat qlon slat slon log_hypo epi az_sin az_cos log_arv slab_top updip path_frac
+hurdle_felt_probability=0.35
+hurdle_felt_floor=0.5
+hurdle_unfelt_ceiling=0.49
+hurdle_logit_per_intensity=1.5
+arv_source=None; the fixture has no site data
+training_period=None; the trees were written by hand
+training_conditions=None; the trees were written by hand
+source=Trees and slab grids written by hand for this repository
