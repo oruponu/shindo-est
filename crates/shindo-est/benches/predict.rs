@@ -1,5 +1,7 @@
 //! Measures prediction for one hypocenter and 4,400 sites with synthetic
-//! forests as large as a full model: 3,300 trees of 63 leaves each.
+//! forests as large as a full model: 3,300 trees of 63 leaves each. The
+//! forests and the Slab2 grids in `data/slab2` are also packed into a model
+//! file, whose size is printed and whose reading is measured.
 //!
 //! The trees are grown on the features of several hypocenters, as `LightGBM`
 //! grows them on training data: every split divides the rows that reach it,
@@ -16,10 +18,10 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use shindo_est::features::{self, FEATURE_COUNT, FEATURE_NAMES};
+use shindo_est::features::{self, FEATURE_COUNT, FEATURE_NAMES, FEATURE_VERSION};
 use shindo_est::forest::{Forest, Tree};
 use shindo_est::{
-    HurdleParams, Hypocenter, Model, Objective, Options, PointResult, Predictor, Site,
+    HurdleParams, Hypocenter, Manifest, Model, ModelBundle, Objective, Options, PointResult, Site,
     SlabGeometry, SlabGrid,
 };
 
@@ -385,21 +387,45 @@ fn model(forest: Forest, objective: Objective) -> Model {
     Model::new(forest, objective, names).expect("the model should be valid")
 }
 
+/// Returns a manifest for the synthetic forests, with [`HURDLE`].
+fn manifest() -> Manifest {
+    let text = format!(
+        "model_id=bench-synthetic\n\
+         feature_version={FEATURE_VERSION}\n\
+         feature_names={feature_names}\n\
+         hurdle_felt_probability={felt_probability:?}\n\
+         hurdle_felt_floor={felt_floor:?}\n\
+         hurdle_unfelt_ceiling={unfelt_ceiling:?}\n\
+         hurdle_logit_per_intensity={logit_per_intensity:?}\n\
+         arv_source=None; the sites take fixed ARVs in turn\n\
+         training_period=None; the forests are synthetic\n\
+         training_conditions=Trees grown on the features of the bench's hypocenters\n",
+        feature_names = FEATURE_NAMES.join(" "),
+        felt_probability = HURDLE.felt_probability,
+        felt_floor = HURDLE.felt_floor,
+        unfelt_ceiling = HURDLE.unfelt_ceiling,
+        logit_per_intensity = HURDLE.logit_per_intensity,
+    );
+    Manifest::parse(&text).expect("the manifest should be valid")
+}
+
 fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * MILLISECONDS_PER_SECOND
 }
 
 /// Runs `case` a few times, then prints the median and the minimum of the
-/// measured runs.
-fn measure(name: &str, mut case: impl FnMut()) {
+/// measured runs. The value `case` returns is dropped after the clock stops,
+/// so freeing it is not measured.
+fn measure<T>(name: &str, mut case: impl FnMut() -> T) {
     for _ in 0..WARMUP_RUNS {
         case();
     }
     let mut durations = Vec::with_capacity(MEASURED_RUNS);
     for _ in 0..MEASURED_RUNS {
         let start = Instant::now();
-        case();
+        let output = case();
         durations.push(start.elapsed());
+        drop(output);
     }
     durations.sort();
     // The runs are even in number, so the median is the mean of the middle two.
@@ -431,6 +457,17 @@ fn main() {
         "forests: 2 x {TREE_COUNT} trees of {LEAF_COUNT} leaves, sites: {}",
         sites.len()
     );
+    // The bundle takes copies, so that the cases below still have the
+    // classifier and the grids to measure on their own.
+    let bundle = ModelBundle::new(
+        manifest(),
+        model(classifier.clone(), Objective::Binary),
+        model(regressor, Objective::Regression),
+        slabs.clone(),
+    )
+    .expect("the bundle should be valid");
+    let bytes = bundle.to_bytes();
+    println!("bundle size: {} bytes", bytes.len());
 
     measure("features", || {
         for site in hint::black_box(&sites) {
@@ -445,13 +482,12 @@ fn main() {
         hint::black_box(&raw);
     });
 
-    let predictor = Predictor::new(
-        model(classifier, Objective::Binary),
-        model(regressor, Objective::Regression),
-        slabs,
-        HURDLE,
-    )
-    .expect("the predictor should be valid");
+    measure("bundle from_bytes", || {
+        let read = ModelBundle::from_bytes(hint::black_box(&bytes));
+        hint::black_box(read.expect("the written file should be valid"))
+    });
+
+    let predictor = bundle.predictor();
     let one_thread = Options::default().with_max_threads(NonZeroUsize::MIN);
     let mut results = vec![PointResult::default(); sites.len()];
     for (name, options) in [
