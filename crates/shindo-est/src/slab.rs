@@ -396,20 +396,12 @@ impl SlabGeometry {
 
     /// Returns the Kuril grid.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the model file writer that uses it comes next")
-    )]
     pub(crate) fn kuril(&self) -> &SlabGrid {
         &self.kuril
     }
 
     /// Returns the Izu-Bonin grid.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the model file writer that uses it comes next")
-    )]
     pub(crate) fn izu_bonin(&self) -> &SlabGrid {
         &self.izu_bonin
     }

@@ -167,6 +167,24 @@ impl Predictor {
         &self.hurdle
     }
 
+    /// Returns the felt classifier's trees.
+    #[must_use]
+    pub(crate) fn classifier(&self) -> &Forest {
+        &self.classifier
+    }
+
+    /// Returns the intensity regressor's trees.
+    #[must_use]
+    pub(crate) fn regressor(&self) -> &Forest {
+        &self.regressor
+    }
+
+    /// Returns the slab geometry.
+    #[must_use]
+    pub(crate) fn slabs(&self) -> &SlabGeometry {
+        &self.slabs
+    }
+
     /// Predicts the intensity at each site, returning one result per site in
     /// the order of `sites`.
     ///

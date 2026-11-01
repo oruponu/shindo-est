@@ -114,6 +114,12 @@ impl Tree {
         })
     }
 
+    /// Returns the number of leaves.
+    #[must_use]
+    pub(crate) fn leaf_count(&self) -> usize {
+        self.leaf_values.len()
+    }
+
     /// Returns the arrays that [`Tree::new`] builds this tree from.
     #[must_use]
     pub(crate) fn arrays(&self) -> TreeArrays {

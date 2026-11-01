@@ -10,7 +10,8 @@ pub const FEATURE_COUNT: usize = 14;
 /// Version of how [`compute`] computes the features. It goes up with any
 /// change that alters the values, so a model whose
 /// [`Manifest::feature_version`](crate::Manifest::feature_version) differs was
-/// trained on features that [`compute`] no longer produces.
+/// trained on other values than [`compute`] gives, and
+/// [`ModelBundle::new`](crate::ModelBundle::new) rejects it.
 pub const FEATURE_VERSION: u32 = 1;
 
 /// Smallest hypocentral distance in km taken for `log_hypo`.
