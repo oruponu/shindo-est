@@ -20,7 +20,7 @@ pub(crate) fn write(writer: &mut Writer, grid: &SlabGrid) {
     writer.f64s(grid.thickness());
 }
 
-/// Reads what [`write`] wrote.
+/// Reads what [`write()`] wrote.
 pub(crate) fn read(reader: &mut Reader<'_>) -> Result<SlabGrid, FormatError> {
     let rows = reader.u32()?;
     let columns = reader.u32()?;

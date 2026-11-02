@@ -43,7 +43,7 @@ pub(crate) fn write(writer: &mut Writer, objective: Objective, forest: &Forest) 
     }
 }
 
-/// Reads what [`write`] wrote and names the features `feature_names`.
+/// Reads what [`write()`] wrote and names the features `feature_names`.
 pub(crate) fn read(
     reader: &mut Reader<'_>,
     feature_names: Vec<String>,
