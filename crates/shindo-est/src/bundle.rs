@@ -218,9 +218,9 @@ impl ModelBundle {
     /// Returns [`FormatError::FeatureVersion`] when the manifest's feature
     /// version is not [`FEATURE_VERSION`], [`FormatError::FeatureNames`] when
     /// its feature names are not [`FEATURE_NAMES`] in their order,
-    /// [`FormatError::LimitExceeded`] when the manifest or a tree is too large
-    /// for a model file to read back, and [`FormatError::Model`] with the
-    /// error of [`Predictor::new`].
+    /// [`FormatError::LimitExceeded`] when the manifest, a forest, or a tree
+    /// is too large for a model file to read back, and [`FormatError::Model`]
+    /// with the error of [`Predictor::new`].
     pub fn new(
         manifest: Manifest,
         classifier: Model,
@@ -230,6 +230,11 @@ impl ModelBundle {
         check_manifest(&manifest)?;
         for model in [&classifier, &regressor] {
             let trees = model.forest().trees();
+            if trees.len() > forest_section::MAX_TREES {
+                return Err(FormatError::LimitExceeded {
+                    what: "trees in a forest",
+                });
+            }
             if trees
                 .iter()
                 .any(|tree| tree.leaf_count() > forest_section::MAX_LEAVES)
@@ -480,6 +485,16 @@ mod tests {
         )
         .expect("the tree should be valid");
         let forest = Forest::new(FEATURE_COUNT, vec![tree]).expect("the forest should be valid");
+        let names: Vec<String> = FEATURE_NAMES.map(String::from).to_vec();
+        Model::new(forest, objective, names).expect("the model should be valid")
+    }
+
+    /// Returns a model of `trees` trees, each a single leaf.
+    fn one_leaf_trees(trees: usize, objective: Objective) -> Model {
+        let tree =
+            Tree::new(&[], &[], &[], &[], &[], &[0.0]).expect("a one-leaf tree should be valid");
+        let forest =
+            Forest::new(FEATURE_COUNT, vec![tree; trees]).expect("the forest should be valid");
         let names: Vec<String> = FEATURE_NAMES.map(String::from).to_vec();
         Model::new(forest, objective, names).expect("the model should be valid")
     }
@@ -750,6 +765,34 @@ mod tests {
         let bundle = new_bundle(
             CANONICAL,
             chain(forest_section::MAX_LEAVES, Objective::Regression),
+        )
+        .expect("the bundle should be valid");
+        ModelBundle::from_bytes(&bundle.to_bytes()).expect("the file should be read back");
+    }
+
+    #[test]
+    fn new_rejects_a_forest_too_large_to_read_back() {
+        // Compared with `err()`, so that a failure does not print every tree.
+        let limit = Some(FormatError::LimitExceeded {
+            what: "trees in a forest",
+        });
+        let trees = forest_section::MAX_TREES + 1;
+        let classifier = ModelBundle::new(
+            manifest(CANONICAL),
+            one_leaf_trees(trees, Objective::Binary),
+            test_support::regressor(),
+            slabs(),
+        );
+        assert_eq!(classifier.err(), limit, "the classifier");
+        let regressor = new_bundle(CANONICAL, one_leaf_trees(trees, Objective::Regression));
+        assert_eq!(regressor.err(), limit, "the regressor");
+    }
+
+    #[test]
+    fn reads_back_a_forest_at_the_limit() {
+        let bundle = new_bundle(
+            CANONICAL,
+            one_leaf_trees(forest_section::MAX_TREES, Objective::Regression),
         )
         .expect("the bundle should be valid");
         ModelBundle::from_bytes(&bundle.to_bytes()).expect("the file should be read back");

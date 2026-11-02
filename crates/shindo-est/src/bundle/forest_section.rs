@@ -8,6 +8,11 @@ use crate::model::{Model, ModelError, Objective};
 /// Most leaves a tree may have, `LightGBM`'s upper bound on `num_leaves`.
 pub(crate) const MAX_LEAVES: usize = 131_072;
 
+/// Most trees a forest may have, about 20 times the trees expected in a
+/// model. It bounds the memory that forged one-leaf trees take beyond the
+/// size of the file.
+pub(crate) const MAX_TREES: usize = 65_536;
+
 /// Code of [`Objective::Regression`].
 const REGRESSION: u8 = 0;
 /// Code of [`Objective::Binary`].
@@ -16,9 +21,9 @@ const BINARY: u8 = 1;
 /// Fewest bytes a tree takes: its leaf count and one leaf value.
 const MIN_TREE_BYTES: usize = 12;
 
-/// Writes the objective and the trees of a model. A tree with more than
-/// [`MAX_LEAVES`] leaves is written but cannot be read back, so callers check
-/// the limit first.
+/// Writes the objective and the trees of a model. A forest with more than
+/// [`MAX_TREES`] trees, or a tree with more than [`MAX_LEAVES`] leaves, is
+/// written but cannot be read back, so callers check the limits first.
 ///
 /// # Panics
 ///
@@ -55,6 +60,11 @@ pub(crate) fn read(
     };
     let feature_count = codec::to_usize(u64::from(reader.u32()?))?;
     let tree_count = codec::to_usize(u64::from(reader.u32()?))?;
+    if tree_count > MAX_TREES {
+        return Err(FormatError::LimitExceeded {
+            what: "trees in a forest",
+        });
+    }
     if tree_count > reader.remaining() / MIN_TREE_BYTES {
         return Err(FormatError::Truncated);
     }
@@ -212,15 +222,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_a_tree_count_beyond_the_bytes() {
+    /// Returns the start of a forest section that declares `tree_count` trees
+    /// on one feature, followed by no trees.
+    fn tree_count_only(tree_count: u32) -> Vec<u8> {
         let mut writer = Writer::new();
         writer.u8(0);
         writer.u32(1);
-        writer.u32(u32::MAX);
+        writer.u32(tree_count);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn rejects_a_tree_count_beyond_the_bytes() {
         assert_eq!(
-            read_bytes(&writer.into_bytes(), names(1)),
+            read_bytes(&tree_count_only(2), names(1)),
             Err(FormatError::Truncated)
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_trees() {
+        let limit = Err(FormatError::LimitExceeded {
+            what: "trees in a forest",
+        });
+        assert_eq!(read_bytes(&tree_count_only(65_537), names(1)), limit);
+        assert_eq!(read_bytes(&tree_count_only(u32::MAX), names(1)), limit);
+        // At the limit, the trees are looked for and turn out to be missing.
+        assert_eq!(
+            read_bytes(&tree_count_only(65_536), names(1)),
+            Err(FormatError::Truncated)
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_trees_that_the_bytes_hold() {
+        let tree =
+            Tree::new(&[], &[], &[], &[], &[], &[0.0]).expect("a one-leaf tree should be valid");
+        let forest = Forest::new(1, vec![tree; MAX_TREES + 1]).expect("the forest should be valid");
+        let model =
+            Model::new(forest, Objective::Regression, names(1)).expect("the model should be valid");
+
+        // Compared with `err()`, so that a failure does not print every tree.
+        assert_eq!(
+            read_bytes(&write_model(&model), names(1)).err(),
+            Some(FormatError::LimitExceeded {
+                what: "trees in a forest"
+            })
         );
     }
 

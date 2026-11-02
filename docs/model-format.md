@@ -158,10 +158,10 @@ A reader checks, in this order:
    rejects the file and reports that version, even if the rest of the
    manifest violates the rules above. Otherwise, the manifest follows the
    rules above, with `feature_version` 1 and the 14 feature names.
-7. Each forest: at least 1 and at most 131,072 leaves per tree, all the trees
-   its count declares within the section, finite leaf values, no NaN
-   thresholds, no categorical splits, children as described, and feature
-   indices below the number of features.
+7. Each forest: at most 65,536 trees, 1 to 131,072 leaves per tree, as many
+   trees within the section as its tree count declares, finite leaf values,
+   no NaN thresholds, no categorical splits, children as described, and
+   feature indices below the number of features.
 8. Each grid: at least 2 rows and 2 columns, at most 4,000,000 nodes, and axes
    as described.
 9. No bytes follow the last section before the checksum.
@@ -169,8 +169,9 @@ A reader checks, in this order:
     satisfy the bounds in the manifest table.
 
 A writer must not write a file that a reader would reject: in particular, no
-manifest of more than 65,536 bytes in canonical form, no tree with more than
-131,072 leaves, and no grid of more than 4,000,000 nodes.
+manifest of more than 65,536 bytes in canonical form, no forest with more
+than 65,536 trees, no tree with more than 131,072 leaves, and no grid with
+more than 4,000,000 nodes.
 
 ## Versions
 
