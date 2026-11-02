@@ -86,8 +86,8 @@ mj depth qlat qlon slat slon log_hypo epi az_sin az_cos log_arv slab_top updip p
 
 `feature_version` 1 names the way the current library computes those
 features. Any change that alters a feature value increments it. A reader
-rejects a model file whose `feature_version` is not the version it supports,
-because its models were trained on features computed differently.
+rejects a model file whose `feature_version` it does not support, because its
+models were trained on features computed differently.
 
 ## Forest section
 
@@ -153,8 +153,11 @@ A reader checks, in this order:
 5. The sections have the names and order above, each length fits in the bytes
    left, and the content of each section is parsed exactly: no bytes are left
    over, and none past its end are read.
-6. The manifest has at most 65,536 bytes, is UTF-8, and follows the rules
-   above, with `feature_version` 1 and the 14 feature names.
+6. The manifest has at most 65,536 bytes and is valid UTF-8. If its first
+   `feature_version` line specifies a version other than 1, the reader
+   rejects the file and reports that version, even if the rest of the
+   manifest violates the rules above. Otherwise, the manifest follows the
+   rules above, with `feature_version` 1 and the 14 feature names.
 7. Each forest: at least 1 and at most 131,072 leaves per tree, all the trees
    its count declares within the section, finite leaf values, no NaN
    thresholds, no categorical splits, children as described, and feature
@@ -175,5 +178,7 @@ The layout version (offset 8) changes when the layout of the file changes. A
 reader rejects any layout version it does not know.
 
 `feature_version` in the manifest changes when the way features are computed
-changes, without any change to the layout. A reader rejects a model file whose
-`feature_version` is not the version it supports.
+changes, without changing the layout. Such a change may add manifest keys. A
+reader rejects a model file whose `feature_version` it does not support and
+reports the unsupported version, even if the manifest has unrecognized keys.
+Any other change to the set of manifest keys requires a new layout version.

@@ -295,6 +295,20 @@ impl FromStr for Manifest {
     }
 }
 
+/// Returns the version that the first `feature_version` line of `text`
+/// states, whether or not the rest of `text` is a valid manifest, or `None`
+/// when there is no such line or its version cannot be read.
+#[must_use]
+pub(crate) fn stated_feature_version(text: &str) -> Option<u32> {
+    let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
+    for line in text.lines() {
+        if let Some((keys::FEATURE_VERSION, value)) = line.split_once('=') {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
 /// Writes the manifest in its canonical form: one line per key in a fixed
 /// order, `source` lines last, each line ending in LF, and numbers written so
 /// that they read back to the same value.
@@ -574,6 +588,23 @@ mod tests {
             Manifest::parse(&text),
             Err(ManifestError::UnknownKey { line: 13 })
         );
+    }
+
+    #[test]
+    fn states_the_feature_version_of_a_manifest_it_cannot_parse() {
+        let text = "\u{feff}feature_version=2\r\ncomment=x\r\n";
+        assert_eq!(super::stated_feature_version(text), Some(2));
+    }
+
+    #[test]
+    fn states_no_feature_version_it_cannot_read() {
+        let missing = without("feature_version=");
+        assert_eq!(super::stated_feature_version(&missing), None);
+        let text = replaced("feature_version=1", "feature_version=x");
+        assert_eq!(super::stated_feature_version(&text), None);
+        // Only the first feature_version line counts.
+        let repeated = "feature_version=x\nfeature_version=2\n";
+        assert_eq!(super::stated_feature_version(repeated), None);
     }
 
     #[test]

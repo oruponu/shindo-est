@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::bundle::codec::{Reader, Writer};
 use crate::features::{FEATURE_NAMES, FEATURE_VERSION};
-use crate::manifest::{Manifest, ManifestError};
+use crate::manifest::{self, Manifest, ManifestError};
 use crate::model::{Model, ModelError, Objective};
 use crate::predict::Predictor;
 use crate::slab::{SlabGeometry, SlabGrid};
@@ -381,7 +381,12 @@ fn read_manifest(section: &mut Reader<'_>) -> Result<Manifest, FormatError> {
     }
     let bytes = section.bytes(section.remaining())?;
     let text = str::from_utf8(bytes).map_err(|_| FormatError::ManifestNotUtf8)?;
-    Manifest::parse(text).map_err(FormatError::Manifest)
+    Manifest::parse(text).map_err(|error| match manifest::stated_feature_version(text) {
+        // Features of another version may come with keys or values this
+        // library cannot read, so the version is what the error names.
+        Some(found) if found != FEATURE_VERSION => FormatError::FeatureVersion { found },
+        _ => FormatError::Manifest(error),
+    })
 }
 
 /// Writes a section named `tag` with what `write` writes.
@@ -808,6 +813,49 @@ mod tests {
         assert_eq!(
             read_error(&unreadable),
             FormatError::FeatureVersion { found: 2 }
+        );
+    }
+
+    #[test]
+    fn names_the_feature_version_of_a_manifest_it_cannot_parse() {
+        // Features of another version may come with a key this library does
+        // not know.
+        let bytes = bundle().to_bytes();
+        let text = format!(
+            "{}feature_params=a\n",
+            CANONICAL.replace("feature_version=1", "feature_version=2")
+        );
+        assert_eq!(
+            read_error(&with_section(&bytes, *b"MNFT", text.as_bytes())),
+            FormatError::FeatureVersion { found: 2 }
+        );
+    }
+
+    #[test]
+    fn names_the_feature_version_of_a_manifest_missing_a_key() {
+        let bytes = bundle().to_bytes();
+        let text = CANONICAL
+            .replace("model_id=synthetic-2026-10\n", "")
+            .replace("feature_version=1", "feature_version=2");
+        assert_eq!(
+            Manifest::parse(&text),
+            Err(ManifestError::MissingKey { key: "model_id" })
+        );
+        assert_eq!(
+            read_error(&with_section(&bytes, *b"MNFT", text.as_bytes())),
+            FormatError::FeatureVersion { found: 2 }
+        );
+    }
+
+    #[test]
+    fn reports_the_manifest_error_when_the_feature_version_is_supported() {
+        let bytes = bundle().to_bytes();
+        let text = format!("{CANONICAL}feature_params=a\n");
+        assert_eq!(
+            read_error(&with_section(&bytes, *b"MNFT", text.as_bytes())),
+            FormatError::Manifest(ManifestError::UnknownKey {
+                line: CANONICAL.lines().count() + 1
+            })
         );
     }
 
