@@ -86,13 +86,6 @@ pub(crate) fn from_input_error(error: InputError) -> i32 {
 }
 
 /// Returns the code of an error in a model file.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the functions that open models will return these codes"
-    )
-)]
 #[must_use]
 pub(crate) fn from_format_error(error: &FormatError) -> i32 {
     match error {

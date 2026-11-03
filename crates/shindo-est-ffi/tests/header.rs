@@ -9,12 +9,17 @@ use std::path::{Path, PathBuf};
 
 /// Functions the header must declare. cbindgen skips an item it cannot
 /// translate without failing, so the names are listed here.
-const FUNCTIONS: [&str; 5] = [
+const FUNCTIONS: [&str; 10] = [
     "shindo_est_abi_version",
     "shindo_est_version",
     "shindo_est_error_message",
     "shindo_est_intensity_class",
     "shindo_est_intensity_label",
+    "shindo_est_model_open",
+    "shindo_est_model_open_file",
+    "shindo_est_model_close",
+    "shindo_est_model_id",
+    "shindo_est_model_manifest",
 ];
 
 fn crate_dir() -> &'static Path {

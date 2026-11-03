@@ -110,6 +110,11 @@
 // `shindo_est_options` keeps it.
 #define SHINDO_EST_ABI_VERSION 1
 
+// An open model. C callers see only pointers to it, which
+// `shindo_est_model_open` and `shindo_est_model_open_file` return and
+// `shindo_est_model_close` frees.
+typedef struct shindo_est_model shindo_est_model;
+
 // An earthquake source.
 typedef struct shindo_est_hypocenter {
   // Latitude in degrees, -90 to 90.
@@ -199,6 +204,69 @@ int32_t shindo_est_intensity_class(double instrumental);
 // Returns the static ASCII label of an intensity class 0 to 9, such as "5-",
 // or NULL for any other value.
 const char *shindo_est_intensity_label(int32_t intensity_class);
+
+// Opens a model from the `length` bytes of a model file at `bytes`. The
+// library keeps no pointer to the bytes after the call, so the caller may
+// free them. On success, writes the handle to `*out` and returns
+// `SHINDO_EST_OK`. On any other code, writes NULL to `*out`, unless `out`
+// itself is NULL or misaligned. NULL `bytes` with `length` 0 reads as no
+// bytes.
+//
+// # Safety
+//
+// The library checks NULL pointers and alignment and returns an error for
+// them. Beyond that:
+//
+// - If `bytes` is not NULL and `length` is not 0, `bytes` must point to
+//   `length` bytes within one allocation (such as one array), valid for
+//   reading, which nothing writes during the call.
+// - If `out` is not NULL and is aligned for a pointer, it must be valid for
+//   writing one pointer.
+int32_t shindo_est_model_open(const uint8_t *bytes, size_t length, struct shindo_est_model **out);
+
+// Opens the model file at the NUL-terminated UTF-8 path `utf8_path`, after
+// checking that it starts like a model file. On success, writes the handle
+// to `*out` and returns `SHINDO_EST_OK`. On any other code, writes NULL to
+// `*out`, unless `out` itself is NULL or misaligned.
+//
+// # Safety
+//
+// The library checks NULL pointers and alignment and returns an error for
+// them. Beyond that:
+//
+// - If `utf8_path` is not NULL, it must point to a NUL-terminated string
+//   within one allocation (such as one array) and at most `PTRDIFF_MAX`
+//   bytes with the NUL, which nothing writes during the call.
+// - If `out` is not NULL and is aligned for a pointer, it must be valid for
+//   writing one pointer.
+int32_t shindo_est_model_open_file(const char *utf8_path, struct shindo_est_model **out);
+
+// Closes a model and frees it. NULL does nothing.
+//
+// # Safety
+//
+// `model` must be NULL or a handle that `shindo_est_model_open` or
+// `shindo_est_model_open_file` returned and that is not closed yet. No other
+// thread may use the handle during or after the call, and the strings taken
+// from it become invalid.
+void shindo_est_model_close(struct shindo_est_model *model);
+
+// Returns the model ID of an open model, or NULL for NULL. The string
+// belongs to the handle and stays valid until the handle is closed.
+//
+// # Safety
+//
+// `model` must be NULL or an open handle.
+const char *shindo_est_model_id(const struct shindo_est_model *model);
+
+// Returns the manifest of an open model, in its canonical text form, or NULL
+// for NULL. The string belongs to the handle and stays valid until the
+// handle is closed.
+//
+// # Safety
+//
+// `model` must be NULL or an open handle.
+const char *shindo_est_model_manifest(const struct shindo_est_model *model);
 
 #ifdef __cplusplus
 }  // extern "C"

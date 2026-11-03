@@ -18,8 +18,11 @@
 mod codes;
 mod guard;
 mod info;
+mod model;
+mod pointer;
 mod types;
 
 pub use codes::*;
 pub use info::*;
+pub use model::*;
 pub use types::*;
