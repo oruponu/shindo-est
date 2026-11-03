@@ -115,7 +115,9 @@ with one leaf has empty split arrays. A nonnegative child is the index of a
 split, which must come after its parent; a negative child `c` is leaf
 `-c - 1`. In a decision type, bit 0 marks a categorical split, which is not
 supported; bit 1 sends missing values to the left; bits 2 and 3 are the
-missing type: 0 for none, 1 for zero, 2 for NaN.
+missing type: 0 for none, 1 for zero, 2 for NaN. A reader rejects a decision
+type that sets any of bits 4 to 7, which are unused, or has missing type 3,
+which is not defined.
 
 The classifier must have objective 1 and the regressor objective 0. The
 forests take the features in the order of `feature_names`, so the number of
@@ -158,10 +160,10 @@ A reader checks, in this order:
    rejects the file and reports that version, even if the rest of the
    manifest violates the rules above. Otherwise, the manifest follows the
    rules above, with `feature_version` 1 and the 14 feature names.
-7. Each forest: at most 65,536 trees, 1 to 131,072 leaves per tree, as many
-   trees within the section as its tree count declares, finite leaf values,
-   no NaN thresholds, no categorical splits, children as described, and
-   feature indices below the number of features.
+7. Each forest: 1 to 65,536 trees, 1 to 131,072 leaves per tree, the
+   declared number of trees, all within the section, finite leaf values, no
+   NaN thresholds, no categorical splits or unknown decision types, children
+   as described, and feature indices below the number of features.
 8. Each grid: at least 2 rows and 2 columns, at most 4,000,000 nodes, and axes
    as described.
 9. No bytes follow the last section before the checksum.

@@ -392,6 +392,22 @@ end of parameters
     }
 
     #[test]
+    fn rejects_unknown_decision_types() {
+        // 16 sets bit 4, and 12 has missing type 3.
+        for decision_type in [16, 12] {
+            assert_eq!(
+                parse_with(
+                    "decision_type=4 8",
+                    &format!("decision_type=4 {decision_type}")
+                )
+                .unwrap_err(),
+                ModelError::UnknownDecisionType { decision_type },
+                "decision type {decision_type}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_linear_trees() {
         let error = parse_with("is_linear=0", "is_linear=1").unwrap_err();
 

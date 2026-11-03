@@ -14,6 +14,10 @@ const MISSING_TYPE_MASK: u8 = 3;
 const MISSING_ZERO: u8 = 1;
 /// Missing type of a node that treats NaN as missing.
 const MISSING_NAN: u8 = 2;
+/// Missing type that `LightGBM` does not define.
+const MISSING_UNDEFINED: u8 = 3;
+/// Bits of a decision type that `LightGBM` does not use.
+const UNUSED_MASK: u8 = 0xf0;
 /// `LightGBM`'s `kZeroThreshold`: values this close to zero count as zero.
 const ZERO_THRESHOLD: f64 = 1e-35_f32 as f64;
 
@@ -62,7 +66,7 @@ impl Tree {
     /// Returns a [`ModelError`] when the tree has no leaves, a leaf value is
     /// NaN or infinite, the node arrays are not one shorter than `leaf_value`,
     /// a child does not point to a later node or an existing leaf, a split is
-    /// categorical, or a threshold is NaN.
+    /// categorical or has an unknown decision type, or a threshold is NaN.
     pub fn new(
         split_feature: &[u32],
         threshold: &[f64],
@@ -95,6 +99,12 @@ impl Tree {
             if decision & CATEGORICAL_MASK != 0 {
                 return Err(ModelError::Categorical);
             }
+            let missing = (decision >> MISSING_TYPE_SHIFT) & MISSING_TYPE_MASK;
+            if decision & UNUSED_MASK != 0 || missing == MISSING_UNDEFINED {
+                return Err(ModelError::UnknownDecisionType {
+                    decision_type: decision,
+                });
+            }
             if threshold[index].is_nan() {
                 return Err(ModelError::NanThreshold);
             }
@@ -102,7 +112,7 @@ impl Tree {
             nodes.push(Node {
                 feature: split_feature[index],
                 threshold: threshold[index],
-                missing: (decision >> MISSING_TYPE_SHIFT) & MISSING_TYPE_MASK,
+                missing,
                 default_left: decision & DEFAULT_LEFT_MASK != 0,
                 left: decode(left_child[index])?,
                 right: decode(right_child[index])?,
@@ -801,6 +811,52 @@ mod tests {
         );
 
         assert_eq!(tree.unwrap_err(), ModelError::Categorical);
+    }
+
+    /// Decision types of the numerical splits `LightGBM` writes: missing type
+    /// 0 to 2, each with and without default left.
+    const LIGHTGBM_DECISION_TYPES: [u8; 6] = [0, 2, 4, 6, 8, 10];
+
+    fn one_split_tree(decision_type: u8) -> Result<Tree, ModelError> {
+        Tree::new(&[0], &[0.5], &[decision_type], &[-1], &[-2], &[1.0, 2.0])
+    }
+
+    #[test]
+    fn accepts_every_decision_type_lightgbm_writes() {
+        for decision_type in LIGHTGBM_DECISION_TYPES {
+            assert!(
+                one_split_tree(decision_type).is_ok(),
+                "decision type {decision_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_every_other_numerical_decision_type() {
+        let numerical = (0..=u8::MAX).step_by(2);
+        for decision_type in numerical {
+            if LIGHTGBM_DECISION_TYPES.contains(&decision_type) {
+                continue;
+            }
+            assert_eq!(
+                one_split_tree(decision_type).unwrap_err(),
+                ModelError::UnknownDecisionType { decision_type },
+                "decision type {decision_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn categorical_is_reported_before_unknown_bits() {
+        // Bit 0 marks a categorical split, so these are the odd values.
+        let categorical = (1..=u8::MAX).step_by(2);
+        for decision_type in categorical {
+            assert_eq!(
+                one_split_tree(decision_type).unwrap_err(),
+                ModelError::Categorical,
+                "decision type {decision_type}"
+            );
+        }
     }
 
     #[test]

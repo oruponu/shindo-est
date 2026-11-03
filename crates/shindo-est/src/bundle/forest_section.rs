@@ -333,4 +333,24 @@ mod tests {
             Err(FormatError::Model(ModelError::NoLeaves))
         );
     }
+
+    #[test]
+    fn unknown_decision_types_are_model_errors() {
+        let bytes = one_tree(1, |writer| {
+            writer.u32(2);
+            writer.u32s(&[0]);
+            writer.f64s(&[0.5]);
+            writer.u8s(&[0x10]);
+            writer.i32s(&[-1]);
+            writer.i32s(&[-2]);
+            writer.f64s(&[1.0, 2.0]);
+        });
+
+        assert_eq!(
+            read_bytes(&bytes, names(1)),
+            Err(FormatError::Model(ModelError::UnknownDecisionType {
+                decision_type: 0x10
+            }))
+        );
+    }
 }

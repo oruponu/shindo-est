@@ -109,6 +109,12 @@ pub enum ModelError {
     NoFeatures,
     /// A split is categorical; only numerical splits are supported.
     Categorical,
+    /// The decision type of a split sets bits 4 to 7, which are unused, or
+    /// has missing type 3, which is not defined.
+    UnknownDecisionType {
+        /// All 8 bits of the decision type, as the model gives them.
+        decision_type: u8,
+    },
     /// A split threshold is NaN.
     NanThreshold,
     /// A leaf value is NaN or infinite.
@@ -189,6 +195,9 @@ impl fmt::Display for ModelError {
             Self::NoTrees => f.write_str("the model has no trees"),
             Self::NoFeatures => f.write_str("the model has no features"),
             Self::Categorical => f.write_str("categorical splits are not supported"),
+            Self::UnknownDecisionType { decision_type } => {
+                write!(f, "a split has an unknown decision type {decision_type}")
+            }
             Self::NanThreshold => f.write_str("a split threshold is NaN"),
             Self::NonFiniteLeafValue => f.write_str("a leaf value is NaN or infinite"),
             Self::Linear => f.write_str("linear trees are not supported"),
