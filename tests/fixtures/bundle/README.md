@@ -27,7 +27,7 @@ Files:
 From the repository root:
 
 ```sh
-cargo run --release -p shindo-est --example pack_model -- \
+cargo run --release -p shindo-est-cli -- pack \
     tests/fixtures/bundle/manifest.txt \
     tests/fixtures/bundle/classifier.txt \
     tests/fixtures/bundle/regressor.txt \

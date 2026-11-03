@@ -13,7 +13,7 @@ A model file is a binary file that contains everything needed to make prediction
 To pack a model file from a manifest, two models in LightGBM's text format, and the Kuril and Izu-Bonin grids as `lon,lat,depth,thickness` CSV files, run:
 
 ```sh
-cargo run --release -p shindo-est --example pack_model -- manifest.txt classifier.txt regressor.txt kuril.csv izu_bonin.csv model.bin
+cargo run --release -p shindo-est-cli -- pack manifest.txt classifier.txt regressor.txt kuril.csv izu_bonin.csv model.bin
 ```
 
 No trained model is published yet. [tests/fixtures/bundle](tests/fixtures/bundle) has a small synthetic one.

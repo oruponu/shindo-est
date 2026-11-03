@@ -291,6 +291,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shindo-est-cli"
+version = "0.1.0"
+dependencies = [
+ "shindo-est",
+]
+
+[[package]]
 name = "shindo-est-ffi"
 version = "0.1.0"
 dependencies = [
