@@ -7,7 +7,7 @@
 //! the `# Safety` section of each exported function.
 
 use std::ffi::{CStr, c_char};
-use std::mem;
+use std::mem::{self, MaybeUninit};
 use std::slice;
 
 use crate::{
@@ -71,6 +71,46 @@ pub(crate) unsafe fn slice<'call, T>(pointer: *const T, count: usize) -> Result<
     // valid for reading `count` values, and not written for 'call: the
     // caller's promise.
     Ok(unsafe { slice::from_raw_parts(pointer, count) })
+}
+
+/// Returns the room for `count` values at `pointer` after [`check`], for
+/// writing: the values may be uninitialized, as in an array a C caller has not
+/// filled, so the slice holds `MaybeUninit`. A count of 0 gives an empty slice
+/// whatever the pointer.
+///
+/// # Safety
+///
+/// If `count` is not 0 and `pointer` passes [`check`], it must point to room
+/// for `count` values within one allocation, valid for writing for `'call`,
+/// which nothing else reads or writes meanwhile.
+pub(crate) unsafe fn uninit_slice<'call, T>(
+    pointer: *mut T,
+    count: usize,
+) -> Result<&'call mut [MaybeUninit<T>], i32> {
+    check(pointer.cast_const(), count)?;
+    if count == 0 {
+        return Ok(&mut []);
+    }
+    // SAFETY: non-null, aligned, at most `isize::MAX` bytes, and not wrapping
+    // the address space: checked by `check` above. Within one allocation,
+    // valid for writing, and not used by anything else for 'call: the caller's
+    // promise. `MaybeUninit` needs no initialized values.
+    Ok(unsafe { slice::from_raw_parts_mut(pointer.cast::<MaybeUninit<T>>(), count) })
+}
+
+/// Returns whether the bytes of `a_count` values at `a` and of `b_count`
+/// values at `b` overlap, comparing the addresses only. A count of 0 overlaps
+/// nothing. The ranges are expected to pass [`check`]; a range that would
+/// pass the end of the address space is cut at the end.
+pub(crate) fn overlaps<A, B>(a: *const A, a_count: usize, b: *const B, b_count: usize) -> bool {
+    if a_count == 0 || b_count == 0 {
+        return false;
+    }
+    let a_start = a.addr();
+    let b_start = b.addr();
+    let a_end = a_start.saturating_add(a_count.saturating_mul(mem::size_of::<A>()));
+    let b_end = b_start.saturating_add(b_count.saturating_mul(mem::size_of::<B>()));
+    a_start < b_end && b_start < a_end
 }
 
 /// Returns the C string at `pointer`.
@@ -161,5 +201,58 @@ mod tests {
         let string = unsafe { super::c_str(ptr::null()) };
 
         assert_eq!(string, Err(SHINDO_EST_ERROR_NULL_POINTER));
+    }
+
+    #[test]
+    fn uninit_slice_checks_like_slice() {
+        let mut words = [0_u64; 2];
+        let misaligned = misaligned(&words).cast_mut();
+        let cases = [
+            (ptr::null_mut(), 1, Err(SHINDO_EST_ERROR_NULL_POINTER)),
+            (misaligned, 1, Err(SHINDO_EST_ERROR_MISALIGNED_POINTER)),
+            (ptr::null_mut(), 0, Ok(0)),
+            (words.as_mut_ptr().cast::<f64>(), 2, Ok(2)),
+        ];
+        for (pointer, count, expected) in cases {
+            // SAFETY: the library rejects the first two before it writes, the
+            // third has no values, and the fourth is the two words.
+            let values = unsafe { super::uninit_slice(pointer, count) };
+            assert_eq!(
+                values.map(|values| values.len()),
+                expected,
+                "{pointer:?}, {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlaps_compares_byte_ranges() {
+        let words = [0_u64; 4];
+        let base = words.as_ptr();
+        let second = base.wrapping_add(1);
+        let third = base.wrapping_add(2);
+        // (a, a count, b, b count, overlap): words [0, 2) and [2, 4) touch
+        // without overlapping, and bytes [0, 9) reach into word 1.
+        let cases = [
+            (base, 2, third, 2, false),
+            (third, 2, base, 2, false),
+            (base, 3, third, 2, true),
+            (third, 2, base, 3, true),
+            (base, 0, base, 2, false),
+            (base, 2, base, 0, false),
+            (second, 1, second, 1, true),
+        ];
+        for (a, a_count, b, b_count, expected) in cases {
+            assert_eq!(
+                super::overlaps(a, a_count, b, b_count),
+                expected,
+                "{a:?}, {a_count}, {b:?}, {b_count}"
+            );
+        }
+        assert!(super::overlaps(base.cast::<u8>(), 9, second, 1), "{base:?}");
+        assert!(
+            !super::overlaps(base.cast::<u8>(), 8, second, 1),
+            "{base:?}"
+        );
     }
 }

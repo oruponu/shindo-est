@@ -35,12 +35,3 @@ autogen_warning = """/*
  * regenerate, run
  * SHINDO_EST_FFI_WRITE_HEADER=1 cargo test -p shindo-est-ffi --test header
  */"""
-
-[export]
-# Structs that no function in the crate takes yet still belong to the ABI.
-include = [
-  "shindo_est_hypocenter",
-  "shindo_est_site",
-  "shindo_est_options",
-  "shindo_est_result",
-]

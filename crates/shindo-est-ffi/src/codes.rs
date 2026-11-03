@@ -60,10 +60,6 @@ pub const SHINDO_EST_STATUS_OUT_OF_SCOPE: i32 = 1;
 pub const SHINDO_EST_STATUS_INVALID_INPUT: i32 = 2;
 
 /// Returns the code of an error in the inputs of a prediction.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shindo_est_predict will return these codes")
-)]
 #[must_use]
 pub(crate) fn from_input_error(error: InputError) -> i32 {
     match error {

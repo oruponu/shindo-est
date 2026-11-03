@@ -3,10 +3,21 @@
 //! The names are the C names in the header, so they are not in Rust's case.
 
 use std::mem;
+use std::num::NonZeroUsize;
 
-use shindo_est::{Hypocenter, PointResult, Site};
+use shindo_est::{Hypocenter, Options, PointResult, Site};
 
-use crate::{codes, info};
+use crate::{
+    SHINDO_EST_ERROR_INVALID_OPTIONS, SHINDO_EST_ERROR_UNSUPPORTED_OPTION, codes, info, pointer,
+};
+
+/// Smallest `size` of options: the size field alone.
+const MIN_OPTIONS_SIZE: usize = mem::size_of::<u64>();
+/// Largest `size` of options the library accepts; larger sizes are rejected.
+const MAX_OPTIONS_SIZE: usize = 4096;
+/// Options sizes are multiples of this, as the fields are laid out in units
+/// of 8 bytes.
+const OPTIONS_SIZE_STEP: usize = 8;
 
 /// An earthquake source.
 #[repr(C)]
@@ -91,6 +102,94 @@ impl Default for shindo_est_options {
             reserved: 0,
         }
     }
+}
+
+/// Reads options that a caller built against any version of the header
+/// passes: NULL gives the defaults, and so does each field that does not fit
+/// in `options->size`.
+///
+/// Returns `SHINDO_EST_ERROR_MISALIGNED_POINTER` for a misaligned pointer,
+/// `SHINDO_EST_ERROR_INVALID_OPTIONS` for a size that is not a multiple of 8
+/// from 8 to 4096, and `SHINDO_EST_ERROR_UNSUPPORTED_OPTION` when `reserved`
+/// or a byte past the fields this library knows is not 0.
+///
+/// # Safety
+///
+/// If `options` is not NULL and is aligned, its first 8 bytes, and its first
+/// `options->size` bytes if that size passes the check, must be within one
+/// allocation, valid for reading, and not written meanwhile.
+pub(crate) unsafe fn read_options(options: *const shindo_est_options) -> Result<Options, i32> {
+    if options.is_null() {
+        return Ok(Options::default());
+    }
+    let size_field = options.cast::<u64>();
+    pointer::check(size_field, 1)?;
+    // SAFETY: non-null and aligned: checked by `pointer::check` above. The
+    // first 8 bytes are readable and not written: the caller's promise.
+    let size = unsafe { size_field.read() };
+    let size = usize::try_from(size)
+        .ok()
+        .filter(|&size| {
+            (MIN_OPTIONS_SIZE..=MAX_OPTIONS_SIZE).contains(&size) && size % OPTIONS_SIZE_STEP == 0
+        })
+        .ok_or(SHINDO_EST_ERROR_INVALID_OPTIONS)?;
+
+    // SAFETY: `options` is aligned: checked by `pointer::check` above. The
+    // offset is that of a field. The first `size` bytes are readable and not
+    // written: the caller's promise. The same holds for the reads below, whose
+    // offsets are those of fields or of single bytes.
+    let offset: Option<f64> =
+        unsafe { read_field(options, size, mem::offset_of!(shindo_est_options, offset)) };
+    // SAFETY: as above.
+    let max_threads: Option<u32> = unsafe {
+        read_field(
+            options,
+            size,
+            mem::offset_of!(shindo_est_options, max_threads),
+        )
+    };
+    // SAFETY: as above.
+    let reserved: Option<u32> =
+        unsafe { read_field(options, size, mem::offset_of!(shindo_est_options, reserved)) };
+    if reserved.is_some_and(|reserved| reserved != 0) {
+        return Err(SHINDO_EST_ERROR_UNSUPPORTED_OPTION);
+    }
+    for byte in mem::size_of::<shindo_est_options>()..size {
+        // SAFETY: as above.
+        let value: Option<u8> = unsafe { read_field(options, size, byte) };
+        if value != Some(0) {
+            return Err(SHINDO_EST_ERROR_UNSUPPORTED_OPTION);
+        }
+    }
+
+    let mut core = Options::default().with_offset(offset.unwrap_or(0.0));
+    let threads = max_threads.and_then(|threads| usize::try_from(threads).ok());
+    if let Some(threads) = threads.and_then(NonZeroUsize::new) {
+        core = core.with_max_threads(threads);
+    }
+    Ok(core)
+}
+
+/// Reads the `F` at `offset` bytes into `options`, or returns `None` when it
+/// does not end within the first `readable` bytes.
+///
+/// # Safety
+///
+/// `options` must be aligned, `offset` must be aligned for `F` relative to
+/// it, and the first `readable` bytes at `options` must be within one
+/// allocation, valid for reading, and not written meanwhile.
+unsafe fn read_field<F: Copy>(
+    options: *const shindo_est_options,
+    readable: usize,
+    offset: usize,
+) -> Option<F> {
+    if offset.checked_add(mem::size_of::<F>())? > readable {
+        return None;
+    }
+    let field = options.cast::<u8>().wrapping_add(offset).cast::<F>();
+    // SAFETY: within the first `readable` bytes: checked above. Aligned,
+    // readable, and not written: the caller's promise.
+    Some(unsafe { field.read() })
 }
 
 /// The prediction for one site.

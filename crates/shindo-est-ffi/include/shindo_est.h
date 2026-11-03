@@ -268,6 +268,43 @@ const char *shindo_est_model_id(const struct shindo_est_model *model);
 // `model` must be NULL or an open handle.
 const char *shindo_est_model_manifest(const struct shindo_est_model *model);
 
+// Predicts the JMA intensity at `count` sites for one hypocenter, writing
+// one result per site to `out` in the order of `sites`. A NULL `options`
+// gives the defaults. With `count` 0, `sites` and `out` may be NULL.
+//
+// Returns `SHINDO_EST_OK`, or the code of the first error found, checking in
+// this order: `model`, `hypocenter`, `sites`, `out`, an overlap of `sites`
+// and `out`, `options`, and then the values of the hypocenter and the
+// offset. On any error, `out` is left as it was. A site that is out of
+// scope or invalid is not an error: its result says so.
+//
+// Any number of threads may call this with the same model at once.
+//
+// # Safety
+//
+// The library checks NULL pointers, alignment, and counts too large for the
+// address space, and returns an error for them. Beyond that:
+//
+// - `model` must be NULL or an open handle, which no thread closes during
+//   the call.
+// - If `hypocenter` is not NULL and is aligned, it must be valid for reading
+//   one hypocenter.
+// - If `count` is not 0 and `sites` is not NULL and is aligned, `sites` must
+//   point to `count` sites within one allocation (such as one array), valid
+//   for reading, which nothing writes during the call.
+// - If `count` is not 0 and `out` is not NULL and is aligned, `out` must
+//   point to `count` results within one allocation, valid for writing, which
+//   nothing else reads or writes during the call.
+// - If `options` is not NULL and is aligned, it must point to at least 8
+//   bytes, and to `options->size` bytes when that size is valid, within one
+//   allocation, valid for reading, which nothing writes during the call.
+int32_t shindo_est_predict(const struct shindo_est_model *model,
+                           const struct shindo_est_hypocenter *hypocenter,
+                           const struct shindo_est_site *sites,
+                           size_t count,
+                           const struct shindo_est_options *options,
+                           struct shindo_est_result *out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

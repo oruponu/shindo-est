@@ -20,9 +20,11 @@ mod guard;
 mod info;
 mod model;
 mod pointer;
+mod predict;
 mod types;
 
 pub use codes::*;
 pub use info::*;
 pub use model::*;
+pub use predict::*;
 pub use types::*;

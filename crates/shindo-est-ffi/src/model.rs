@@ -44,7 +44,6 @@ impl shindo_est_model {
 
     /// Returns the model file the handle holds.
     #[must_use]
-    #[expect(dead_code, reason = "shindo_est_predict will predict with it")]
     pub(crate) fn bundle(&self) -> &ModelBundle {
         &self.bundle
     }
