@@ -309,7 +309,7 @@ impl Predictor {
             if !validate::site_is_valid(site) {
                 continue;
             }
-            if call_scope == Scope::OutOfScope {
+            if let Scope::OutOfScope(_) = call_scope {
                 out[index].status = PointStatus::OutOfScope;
             } else {
                 rows.extend_from_slice(&features::compute(hypocenter, site, &self.slabs));

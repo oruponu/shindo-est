@@ -27,6 +27,37 @@ pub enum HypocenterField {
     Magnitude,
 }
 
+/// A field of a [`Site`], which [`check_site`] returns as the error when the
+/// field is invalid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[must_use]
+pub enum SiteField {
+    /// [`Site::latitude`].
+    Latitude,
+    /// [`Site::longitude`].
+    Longitude,
+    /// [`Site::arv`].
+    Arv,
+}
+
+impl fmt::Display for SiteField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Latitude => write!(
+                f,
+                "the site latitude must be within -{MAX_LATITUDE}..={MAX_LATITUDE}"
+            ),
+            Self::Longitude => write!(
+                f,
+                "the site longitude must be within -{MAX_LONGITUDE}..={MAX_LONGITUDE}"
+            ),
+            Self::Arv => f.write_str("the site ARV must be finite and positive"),
+        }
+    }
+}
+
+impl std::error::Error for SiteField {}
+
 /// An input that is invalid for every site of a call.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
@@ -67,20 +98,34 @@ impl std::error::Error for InputError {}
 pub enum Scope {
     /// The sites get intensities.
     InScope,
-    /// The depth is unknown, or the magnitude is unknown or not positive, so
-    /// no site gets an intensity.
-    OutOfScope,
+    /// No site gets an intensity, for the reason given.
+    OutOfScope(OutOfScopeReason),
+}
+
+/// Why a valid call is out of scope.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum OutOfScopeReason {
+    /// The depth is NaN.
+    UnknownDepth,
+    /// The magnitude is NaN.
+    UnknownMagnitude,
+    /// The magnitude is at or below 0.
+    NonPositiveMagnitude,
 }
 
 /// Checks the hypocenter and the offset of a call.
+///
+/// A call with no invalid input is out of scope when the depth is NaN, the
+/// magnitude is NaN, or the magnitude is at or below 0, and the reason is the
+/// first of these that holds.
 ///
 /// # Errors
 ///
 /// Returns the first invalid input, checking the latitude, the longitude, the
 /// depth, the magnitude, and the offset in this order: a latitude or longitude
 /// that is not finite or out of range, a negative or infinite depth, a
-/// magnitude of positive infinity, or an offset that is not finite. A call is
-/// out of scope only when it has no invalid input.
+/// magnitude of positive infinity, or an offset that is not finite.
 pub fn check_call(hypocenter: &Hypocenter, offset: f64) -> Result<Scope, InputError> {
     if !latitude_is_valid(hypocenter.latitude) {
         return Err(InputError::InvalidHypocenter(HypocenterField::Latitude));
@@ -100,21 +145,41 @@ pub fn check_call(hypocenter: &Hypocenter, offset: f64) -> Result<Scope, InputEr
         return Err(InputError::InvalidOffset);
     }
 
-    if depth.is_nan() || magnitude.is_nan() || magnitude <= 0.0 {
-        Ok(Scope::OutOfScope)
+    if depth.is_nan() {
+        Ok(Scope::OutOfScope(OutOfScopeReason::UnknownDepth))
+    } else if magnitude.is_nan() {
+        Ok(Scope::OutOfScope(OutOfScopeReason::UnknownMagnitude))
+    } else if magnitude <= 0.0 {
+        Ok(Scope::OutOfScope(OutOfScopeReason::NonPositiveMagnitude))
     } else {
         Ok(Scope::InScope)
     }
 }
 
-/// Returns whether a site has a finite latitude within -90 to 90, a finite
-/// longitude within -180 to 180, and a finite, positive ARV.
+/// Checks that a site has a latitude within -90 to 90, a longitude within
+/// -180 to 180, and a finite, positive ARV.
+///
+/// # Errors
+///
+/// Returns the first invalid field, checking the latitude, the longitude, and
+/// the ARV in this order. NaN is invalid in each.
+pub fn check_site(site: &Site) -> Result<(), SiteField> {
+    if !latitude_is_valid(site.latitude) {
+        return Err(SiteField::Latitude);
+    }
+    if !longitude_is_valid(site.longitude) {
+        return Err(SiteField::Longitude);
+    }
+    if !(site.arv.is_finite() && site.arv > 0.0) {
+        return Err(SiteField::Arv);
+    }
+    Ok(())
+}
+
+/// Returns whether [`check_site`] accepts a site.
 #[must_use]
 pub fn site_is_valid(site: &Site) -> bool {
-    latitude_is_valid(site.latitude)
-        && longitude_is_valid(site.longitude)
-        && site.arv.is_finite()
-        && site.arv > 0.0
+    check_site(site).is_ok()
 }
 
 /// Returns whether a latitude lies within -90 to 90, which NaN does not.
@@ -170,17 +235,56 @@ mod tests {
             depth: f64::NAN,
             ..HYPOCENTER
         };
-        assert_eq!(check(hypocenter), Ok(Scope::OutOfScope));
+        assert_eq!(
+            check(hypocenter),
+            Ok(Scope::OutOfScope(OutOfScopeReason::UnknownDepth)),
+            "{hypocenter:?}"
+        );
     }
 
     #[test]
     fn nan_or_non_positive_magnitude_is_out_of_scope() {
-        for magnitude in [f64::NAN, 0.0, -0.0, -1.0, f64::NEG_INFINITY] {
+        let cases = [
+            (f64::NAN, OutOfScopeReason::UnknownMagnitude),
+            (0.0, OutOfScopeReason::NonPositiveMagnitude),
+            (-0.0, OutOfScopeReason::NonPositiveMagnitude),
+            (-1.0, OutOfScopeReason::NonPositiveMagnitude),
+            (f64::NEG_INFINITY, OutOfScopeReason::NonPositiveMagnitude),
+        ];
+        for (magnitude, reason) in cases {
             let hypocenter = Hypocenter {
                 magnitude,
                 ..HYPOCENTER
             };
-            assert_eq!(check(hypocenter), Ok(Scope::OutOfScope), "{magnitude}");
+            assert_eq!(
+                check(hypocenter),
+                Ok(Scope::OutOfScope(reason)),
+                "{magnitude}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_scope_names_the_reason() {
+        // An unknown depth is named first, then an unknown magnitude.
+        let cases = [
+            (f64::NAN, f64::NAN, OutOfScopeReason::UnknownDepth),
+            (f64::NAN, 0.0, OutOfScopeReason::UnknownDepth),
+            (10.0, f64::NAN, OutOfScopeReason::UnknownMagnitude),
+            (10.0, 0.0, OutOfScopeReason::NonPositiveMagnitude),
+            (10.0, -1.0, OutOfScopeReason::NonPositiveMagnitude),
+        ];
+        for (depth, magnitude, reason) in cases {
+            let hypocenter = Hypocenter {
+                depth,
+                magnitude,
+                ..HYPOCENTER
+            };
+            assert_eq!(
+                check(hypocenter),
+                Ok(Scope::OutOfScope(reason)),
+                "depth {depth}, magnitude {magnitude}"
+            );
         }
     }
 
@@ -367,6 +471,81 @@ mod tests {
         for (error, name) in cases {
             let message = error.to_string();
             assert!(message.contains(name), "{name}: {message}");
+        }
+    }
+
+    /// Sites with what `check_site` returns for them.
+    const CHECKED_SITES: [(Site, Result<(), SiteField>); 5] = [
+        (
+            Site {
+                latitude: 91.0,
+                longitude: 200.0,
+                arv: 0.0,
+            },
+            Err(SiteField::Latitude),
+        ),
+        (
+            Site {
+                latitude: 35.0,
+                longitude: 200.0,
+                arv: 0.0,
+            },
+            Err(SiteField::Longitude),
+        ),
+        (
+            Site {
+                latitude: 35.0,
+                longitude: 139.0,
+                arv: 0.0,
+            },
+            Err(SiteField::Arv),
+        ),
+        (
+            Site {
+                latitude: 35.0,
+                longitude: 139.0,
+                arv: f64::NAN,
+            },
+            Err(SiteField::Arv),
+        ),
+        (
+            Site {
+                latitude: 35.0,
+                longitude: 139.0,
+                arv: 1.0,
+            },
+            Ok(()),
+        ),
+    ];
+
+    #[test]
+    fn check_site_names_the_first_invalid_field() {
+        for (site, expected) in CHECKED_SITES {
+            assert_eq!(super::check_site(&site), expected, "{site:?}");
+        }
+    }
+
+    #[test]
+    fn site_errors_name_the_field() {
+        let cases = [
+            (SiteField::Latitude, "latitude"),
+            (SiteField::Longitude, "longitude"),
+            (SiteField::Arv, "ARV"),
+        ];
+        for (field, name) in cases {
+            let message = field.to_string();
+            assert!(message.contains(name), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn site_is_valid_agrees_with_check_site() {
+        for (site, _) in CHECKED_SITES {
+            assert_eq!(
+                super::site_is_valid(&site),
+                super::check_site(&site).is_ok(),
+                "{site:?}"
+            );
         }
     }
 
