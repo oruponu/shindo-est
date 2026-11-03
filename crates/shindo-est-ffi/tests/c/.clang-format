@@ -1,0 +1,5 @@
+# Formatting of the C sources in this folder: Google style, with the asterisk
+# of a pointer next to the name, as in the generated header.
+BasedOnStyle: Google
+DerivePointerAlignment: false
+PointerAlignment: Right
