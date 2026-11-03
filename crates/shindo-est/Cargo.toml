@@ -9,6 +9,12 @@ publish = false
 libm = "0.2.16"
 sha2 = "0.11.1"
 
+# Miri cannot execute the inline assembly used by libm's x86 sqrt, so tests
+# under Miri use libm's portable sqrt. Both are correctly rounded, so they
+# produce identical bits for all non-NaN results.
+[target.'cfg(miri)'.dependencies]
+libm = { version = "0.2.16", features = ["force-soft-floats"] }
+
 [[bench]]
 name = "predict"
 harness = false
