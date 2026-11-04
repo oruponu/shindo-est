@@ -130,6 +130,16 @@ fn read(line: &[u8]) -> Result<Request<'_>, Rejection<'_>> {
     };
     let id_only: Result<JsonObject<IdOnly<'_>>, _> = serde_json::from_str(text);
     let id = id_only.ok().and_then(|object| object.0.id);
+    // A raw CR can only be whitespace between the tokens of the ID, as JSON
+    // strings must escape it, but an answer that repeats it would be split by
+    // a caller that reads lines with universal newlines.
+    if id.is_some_and(|raw| raw.get().contains('\r')) {
+        return Err(Rejection {
+            id: None,
+            code: "invalid_request",
+            message: "the id has a raw carriage return between its tokens".to_owned(),
+        });
+    }
     let body: Result<JsonObject<RequestBody>, _> = serde_json::from_str(text);
     let body = match body {
         Ok(body) => body.0,
@@ -498,6 +508,8 @@ mod tests {
         for id in [
             "7",
             r#""a""#,
+            // An escaped CR, two characters that the answer keeps as such.
+            r#""a\rb""#,
             r#"{"k": [1]}"#,
             "null",
             "18446744073709551617",
@@ -714,6 +726,32 @@ mod tests {
         ] {
             assert_eq!(super::input_error_code(error), code, "{error:?}");
         }
+    }
+
+    #[test]
+    fn rejects_an_id_with_a_raw_carriage_return() {
+        let line = format!("{{\"id\": [1,\r2], \"hypocenter\": {HYPOCENTER}, \"sites\": []}}");
+
+        let answered = answer(line.as_bytes()).json;
+
+        assert!(!answered.contains('\r'), "{answered:?}");
+        assert!(
+            answered.starts_with(r#"{"error":{"code":"invalid_request","#),
+            "{answered:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_raw_carriage_return_outside_the_id() {
+        // The answer does not repeat the other parts of the request.
+        let line = format!("{{\"id\": 1,\r\"hypocenter\": {HYPOCENTER},\r\"sites\": []}}");
+
+        let answered = answer(line.as_bytes()).json;
+
+        assert!(
+            answered.starts_with(r#"{"id":1,"model_id":"#),
+            "{answered:?}"
+        );
     }
 
     #[test]

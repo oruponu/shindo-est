@@ -145,15 +145,20 @@ that order.
 {"id":7,"error":{"code":"invalid_hypocenter_depth","message":"the hypocenter depth must be finite and at least 0, or NaN if unknown"}}
 ```
 
-The answer has `id` if the line is a JSON object with an `id`, except for
-`request_too_large`, because oversized lines are not parsed as JSON.
+The answer has `id` if the line is a JSON object containing an `id`, with
+two exceptions. A `request_too_large` answer has no `id`, because oversized
+lines are not parsed as JSON. If the JSON text of an `id` contains a raw
+carriage return between tokens, as in `[1,<CR>2]`, the request is rejected
+with `invalid_request`, and the answer omits `id` to keep the answer on a
+single line. (A raw carriage return inside a JSON string is not valid JSON
+and gives `invalid_json`.)
 `message` is an English description for people; programs should look at
 `code`.
 
 | `code` | When |
 |---|---|
 | `invalid_json` | The line is not JSON: not UTF-8, a syntax error, or a number out of range. |
-| `invalid_request` | The line is JSON but not a request: not an object, a missing or unknown key, or a value of the wrong type. |
+| `invalid_request` | The line is valid JSON but not a valid request: a non-object value, a missing or unknown key, a value of the wrong type, or a raw carriage return between tokens in the JSON text of `id`. |
 | `request_too_large` | The line is longer than 16 MiB. |
 | `invalid_hypocenter_latitude` | The hypocenter's latitude is `null` or not within -90 to 90. |
 | `invalid_hypocenter_longitude` | The hypocenter's longitude is `null` or not within -180 to 180. |
