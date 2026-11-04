@@ -3,16 +3,13 @@
 
 use std::ffi::{CStr, CString, c_char};
 use std::fs::File;
-use std::io::ErrorKind;
 use std::ptr;
 
 use shindo_est::ModelBundle;
-use shindo_est::bundle::MAGIC;
 
 use crate::{
     SHINDO_EST_ERROR_INVALID_MODEL_FILE, SHINDO_EST_ERROR_INVALID_PATH, SHINDO_EST_ERROR_IO,
-    SHINDO_EST_ERROR_NOT_A_MODEL_FILE, SHINDO_EST_ERROR_PANIC, SHINDO_EST_OK, codes, guard,
-    pointer,
+    SHINDO_EST_ERROR_PANIC, SHINDO_EST_OK, codes, guard, pointer,
 };
 
 /// An open model. C callers see only pointers to it, which
@@ -56,30 +53,16 @@ fn open(bytes: &[u8]) -> Result<Box<shindo_est_model>, i32> {
     shindo_est_model::new(bundle).map(Box::new)
 }
 
-/// Reads a model file, checking its magic before reading the rest so that a
-/// large file of another kind is not read whole.
-fn read_file(utf8_path: &CStr) -> Result<Vec<u8>, i32> {
-    use std::io::Read;
-
+/// Opens the model file at a UTF-8 path. [`ModelBundle::read`] checks the
+/// magic before reading the rest, so that a large file of another kind is
+/// not read whole.
+fn open_file(utf8_path: &CStr) -> Result<Box<shindo_est_model>, i32> {
     let path = utf8_path
         .to_str()
         .map_err(|_| SHINDO_EST_ERROR_INVALID_PATH)?;
-    let mut file = File::open(path).map_err(|_| SHINDO_EST_ERROR_IO)?;
-    let mut magic = [0; MAGIC.len()];
-    match file.read_exact(&mut magic) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
-            return Err(SHINDO_EST_ERROR_NOT_A_MODEL_FILE);
-        }
-        Err(_) => return Err(SHINDO_EST_ERROR_IO),
-    }
-    if magic != MAGIC {
-        return Err(SHINDO_EST_ERROR_NOT_A_MODEL_FILE);
-    }
-    let mut bytes = magic.to_vec();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| SHINDO_EST_ERROR_IO)?;
-    Ok(bytes)
+    let file = File::open(path).map_err(|_| SHINDO_EST_ERROR_IO)?;
+    let bundle = ModelBundle::read(file).map_err(|error| codes::from_read_error(&error))?;
+    shindo_est_model::new(bundle).map(Box::new)
 }
 
 /// Checks `out`, writes NULL there, runs `open_model`, and writes the handle
@@ -174,7 +157,7 @@ pub unsafe extern "C" fn shindo_est_model_open_file(
             // (`isize::MAX`) bytes, valid for reading, and not written during
             // the call, if not NULL: the caller's promise.
             let path = unsafe { pointer::c_str(utf8_path) }?;
-            open(&read_file(path)?)
+            open_file(path)
         };
         // SAFETY: `out` is valid for writing if it passes the check: the
         // caller's promise.

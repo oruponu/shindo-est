@@ -3,7 +3,7 @@
 use std::ffi::{CStr, c_char};
 
 use shindo_est::validate::HypocenterField;
-use shindo_est::{FormatError, InputError, PointStatus};
+use shindo_est::{FormatError, InputError, PointStatus, ReadError};
 
 use crate::guard;
 
@@ -92,6 +92,16 @@ pub(crate) fn from_format_error(error: &FormatError) -> i32 {
     }
 }
 
+/// Returns the code of an error from reading a model file.
+#[must_use]
+pub(crate) fn from_read_error(error: &ReadError) -> i32 {
+    match error {
+        ReadError::Format(error) => from_format_error(error),
+        // Any kind of error the core adds later is also an I/O error.
+        ReadError::Io(_) | _ => SHINDO_EST_ERROR_IO,
+    }
+}
+
 /// Returns the status code of a result.
 #[must_use]
 pub(crate) fn from_status(status: PointStatus) -> i32 {
@@ -157,6 +167,8 @@ pub extern "C" fn shindo_est_error_message(code: i32) -> *const c_char {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
 
     /// Every error code with the value the header gives it.
@@ -271,6 +283,27 @@ mod tests {
         ];
         for (error, code) in cases {
             assert_eq!(super::from_format_error(&error), code, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn read_errors_map_to_codes() {
+        let cases = [
+            (
+                ReadError::Io(io::Error::other("disk on fire")),
+                SHINDO_EST_ERROR_IO,
+            ),
+            (
+                ReadError::Format(FormatError::NotAModelFile),
+                SHINDO_EST_ERROR_NOT_A_MODEL_FILE,
+            ),
+            (
+                ReadError::Format(FormatError::ChecksumMismatch),
+                SHINDO_EST_ERROR_INVALID_MODEL_FILE,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(super::from_read_error(&error), code, "{error:?}");
         }
     }
 }

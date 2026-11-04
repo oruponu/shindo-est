@@ -29,6 +29,42 @@ fn run(arguments: &[&Path]) -> Output {
         .expect("the binary should run")
 }
 
+/// Runs the binary as [`run`] does, but kills it and fails the test if it has
+/// not exited within 10 seconds, so that a binary that reads without end
+/// fails at once instead of running out of memory.
+#[cfg(unix)]
+fn run_with_deadline(arguments: &[&Path]) -> Output {
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const DEADLINE: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_shindo-est"))
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary should start");
+    let started = Instant::now();
+    loop {
+        let status = child.try_wait().expect("the binary can be waited for");
+        if status.is_some() {
+            break;
+        }
+        if started.elapsed() > DEADLINE {
+            child.kill().expect("the binary can be killed");
+            child.wait().expect("the killed binary can be waited for");
+            panic!("the binary did not exit within {DEADLINE:?}");
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    child
+        .wait_with_output()
+        .expect("the output of the binary can be read")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("the output is UTF-8")
 }
@@ -260,6 +296,17 @@ fn info_names_a_file_it_cannot_read() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let errors = stderr(&output);
     assert!(errors.contains(&missing.display().to_string()), "{errors}");
+}
+
+#[cfg(unix)]
+#[test]
+fn info_stops_at_the_magic_of_an_endless_file() {
+    let output = run_with_deadline(&[Path::new("info"), Path::new("/dev/zero")]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let errors = stderr(&output);
+    assert!(errors.contains("/dev/zero"), "{errors}");
+    assert!(errors.contains("not a model file"), "{errors}");
 }
 
 #[test]

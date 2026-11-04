@@ -1,6 +1,7 @@
 //! Model files: the models and the data they need, in one binary file.
 
 use std::fmt;
+use std::io;
 use std::str;
 
 use sha2::{Digest, Sha256};
@@ -143,6 +144,36 @@ impl std::error::Error for FormatError {
             Self::Manifest(error) => Some(error),
             Self::Model(error) => Some(error),
             _ => None,
+        }
+    }
+}
+
+/// An error from [`ModelBundle::read`]. It displays as the error it holds,
+/// whose source is its own.
+#[derive(Debug)]
+#[must_use]
+#[non_exhaustive]
+pub enum ReadError {
+    /// Reading failed.
+    Io(io::Error),
+    /// The bytes read are not a valid model file.
+    Format(FormatError),
+}
+
+impl fmt::Display for ReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Format(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => error.source(),
+            Self::Format(error) => error.source(),
         }
     }
 }
@@ -304,6 +335,33 @@ impl ModelBundle {
         )
     }
 
+    /// Reads a model file from `reader`, as [`ModelBundle::from_bytes`] does
+    /// from bytes. Reads the first bytes alone and stops if they are not
+    /// [`MAGIC`], so that a large file of another kind is not read whole.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReadError::Io`] when reading fails, and
+    /// [`ReadError::Format`] with [`FormatError::NotAModelFile`] when the
+    /// reader ends before the magic or gives other bytes, or with the error
+    /// of [`ModelBundle::from_bytes`].
+    pub fn read(mut reader: impl io::Read) -> Result<Self, ReadError> {
+        let mut magic = [0; MAGIC.len()];
+        match reader.read_exact(&mut magic) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(ReadError::Format(FormatError::NotAModelFile));
+            }
+            Err(error) => return Err(ReadError::Io(error)),
+        }
+        if magic != MAGIC {
+            return Err(ReadError::Format(FormatError::NotAModelFile));
+        }
+        let mut bytes = magic.to_vec();
+        reader.read_to_end(&mut bytes).map_err(ReadError::Io)?;
+        Self::from_bytes(&bytes).map_err(ReadError::Format)
+    }
+
     /// Writes the model file, the same bytes every time for the same bundle.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -416,6 +474,7 @@ fn write_grid_section(writer: &mut Writer, tag: &str, grid: &SlabGrid) {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::io;
     use std::ops::Range;
 
     use super::*;
@@ -932,5 +991,173 @@ mod tests {
     fn is_exported_at_the_crate_root() {
         let error: crate::FormatError = FormatError::Truncated;
         assert_eq!(error, FormatError::Truncated);
+    }
+
+    /// A reader that fails with `kind` on its first `failures` reads, then
+    /// reads `bytes`.
+    struct FailingReader {
+        kind: io::ErrorKind,
+        failures: usize,
+        bytes: io::Cursor<Vec<u8>>,
+    }
+
+    impl FailingReader {
+        fn new(kind: io::ErrorKind, failures: usize, bytes: Vec<u8>) -> Self {
+            Self {
+                kind,
+                failures,
+                bytes: io::Cursor::new(bytes),
+            }
+        }
+    }
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.failures > 0 {
+                self.failures -= 1;
+                return Err(io::Error::from(self.kind));
+            }
+            self.bytes.read(buffer)
+        }
+    }
+
+    /// A reader of `bytes` that panics when asked to read past them, so that
+    /// reading on fails a test at once instead of running out of memory.
+    struct StrictReader {
+        bytes: io::Cursor<Vec<u8>>,
+    }
+
+    impl StrictReader {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes: io::Cursor::new(bytes),
+            }
+        }
+    }
+
+    impl io::Read for StrictReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.bytes.read(buffer)?;
+            assert!(
+                count > 0 || buffer.is_empty(),
+                "read past the end of the {} bytes",
+                self.bytes.get_ref().len()
+            );
+            Ok(count)
+        }
+    }
+
+    fn read_failure(reader: impl io::Read) -> ReadError {
+        ModelBundle::read(reader).expect_err("reading should fail")
+    }
+
+    #[test]
+    fn read_gives_what_from_bytes_gives() {
+        let bytes = bundle().to_bytes();
+
+        let read = ModelBundle::read(bytes.as_slice()).expect("the bytes should be a model file");
+
+        assert_eq!(read.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn read_stops_after_a_wrong_magic() {
+        let mut almost_the_magic = MAGIC;
+        almost_the_magic[MAGIC.len() - 1] ^= 1;
+
+        for bytes in [[0; MAGIC.len()], almost_the_magic] {
+            let error = read_failure(StrictReader::new(bytes.to_vec()));
+
+            assert!(
+                matches!(error, ReadError::Format(FormatError::NotAModelFile)),
+                "{bytes:?}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_rejects_a_reader_shorter_than_the_magic() {
+        for bytes in [&b""[..], &MAGIC[..3]] {
+            let error = read_failure(bytes);
+
+            assert!(
+                matches!(error, ReadError::Format(FormatError::NotAModelFile)),
+                "{bytes:?}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_reports_bytes_after_the_magic_as_format_errors() {
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(b'x');
+
+        let error = read_failure(bytes.as_slice());
+
+        assert!(
+            matches!(error, ReadError::Format(FormatError::Truncated)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn read_reports_failed_reads_as_io_errors() {
+        use std::io::Read;
+
+        let first = read_failure(FailingReader::new(io::ErrorKind::Other, 1, MAGIC.to_vec()));
+        let after_the_magic = read_failure(MAGIC.as_slice().chain(FailingReader::new(
+            io::ErrorKind::Other,
+            1,
+            Vec::new(),
+        )));
+
+        for error in [first, after_the_magic] {
+            assert!(
+                matches!(&error, ReadError::Io(inner) if inner.kind() == io::ErrorKind::Other),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_retries_interrupted_reads() {
+        let bytes = bundle().to_bytes();
+
+        let read = ModelBundle::read(FailingReader::new(
+            io::ErrorKind::Interrupted,
+            1,
+            bytes.clone(),
+        ))
+        .expect("an interrupted read should be retried");
+
+        assert_eq!(read.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn read_errors_are_transparent() {
+        let format = ReadError::Format(FormatError::NotAModelFile);
+        let failed_read = ReadError::Io(io::Error::other("disk on fire"));
+
+        assert_eq!(format.to_string(), FormatError::NotAModelFile.to_string());
+        assert!(format.source().is_none(), "{:?}", format.source());
+        assert_eq!(
+            ReadError::Format(FormatError::Manifest(ManifestError::MissingKey {
+                key: "model_id"
+            }))
+            .source()
+            .map(ToString::to_string),
+            Some(ManifestError::MissingKey { key: "model_id" }.to_string())
+        );
+        assert_eq!(failed_read.to_string(), "disk on fire");
+        assert!(failed_read.source().is_none(), "{:?}", failed_read.source());
+        // An I/O error that wraps another error has that error's source.
+        assert_eq!(
+            ReadError::Io(io::Error::other(FormatError::Manifest(
+                ManifestError::MissingKey { key: "model_id" }
+            )))
+            .source()
+            .map(ToString::to_string),
+            Some(ManifestError::MissingKey { key: "model_id" }.to_string())
+        );
     }
 }
