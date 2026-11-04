@@ -18,6 +18,27 @@ cargo run --release -p shindo-est-cli -- pack manifest.txt classifier.txt regres
 
 No trained model is published yet. [tests/fixtures/bundle](tests/fixtures/bundle) has a small synthetic one.
 
+## Command line
+
+The `shindo-est-cli` crate provides the `shindo-est` command for packing and inspecting model files and answering prediction requests:
+
+```sh
+cargo build --release -p shindo-est-cli
+```
+
+`shindo-est predict` loads a model file once, then answers requests until standard input reaches EOF. Each request is a single-line JSON object. The command writes a single-line JSON answer for each request, in order, and flushes standard output after each answer. This lets another program keep the command running and send requests as it needs them:
+
+```sh
+echo '{"id": 1, "hypocenter": {"latitude": 35.02, "longitude": 140.02, "depth": 80.0, "magnitude": 6.5}, "sites": [{"latitude": 35.02, "longitude": 140.02, "arv": 1.0}]}' \
+  | target/release/shindo-est predict --model tests/fixtures/bundle/model.bin
+```
+
+```json
+{"id":1,"model_id":"synthetic-fixture","offset":0.0,"results":[{"status":"ok","class":"4","instrumental":3.9000000000000004,"probability":0.9088770389851438,"regression":3.9000000000000004}]}
+```
+
+[docs/cli.md](docs/cli.md) documents the commands, the request and answer formats, and the error codes.
+
 ## C ABI
 
 The `shindo-est-ffi` crate builds a shared library that exposes a C API:
