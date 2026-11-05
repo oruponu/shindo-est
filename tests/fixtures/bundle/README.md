@@ -21,6 +21,13 @@ Files:
 - `izu_bonin.csv`: a 4 x 4 grid of nodes spanning 34.80 to 34.95 N and 140.00
   to 140.15 E, with a constant depth of 30 km and a slab thickness of 40 km.
 - `model.bin`: the model file packed from the five files above.
+- `expected.csv`: reference values for `model.bin`, one row per site for
+  each call the test makes, with the inputs, the features, and the
+  prediction. Finite numbers are written in Rust's shortest round-trip form,
+  so that every language binding can compare its results with them bit for
+  bit. Unknown values are written as `NaN`, and two `NaN` values are treated
+  as equal when comparing results. For the site with an ARV of 0,
+  `feature_log_arv` is `-inf`.
 
 ## Regenerating
 
@@ -42,3 +49,11 @@ from `model.bin`. If the change is intended, regenerate `model.bin` and
 review the test expectations. A change that breaks compatibility with
 existing readers also requires a new layout version (see
 `docs/model-format.md`).
+
+It also fails when the library's values differ from `expected.csv`.
+If the change is intended, regenerate the file and review the differences:
+
+```sh
+SHINDO_EST_WRITE_EXPECTED=1 cargo test -p shindo-est --test model_bundle \
+    committed_expected_values_match
+```

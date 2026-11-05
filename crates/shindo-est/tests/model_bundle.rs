@@ -1,12 +1,16 @@
 //! Checks the model file in `tests/fixtures/bundle` against the text sources it
-//! was packed from, so that a change to the layout of model files shows.
+//! was packed from, so that a change to the layout of model files shows, and
+//! checks the library's features and predictions against `expected.csv`.
 
+use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use shindo_est::features::{self, FEATURE_NAMES};
 use shindo_est::{
-    HurdleParams, Hypocenter, Manifest, Model, ModelBundle, Options, PointResult, PointStatus,
-    Predictor, Site, SlabGeometry, SlabGrid, lightgbm_text,
+    HurdleParams, Hypocenter, IntensityClass, Manifest, Model, ModelBundle, Options, PointResult,
+    PointStatus, Predictor, Site, SlabGeometry, SlabGrid, lightgbm_text,
 };
 
 /// A hypocenter under the Kuril grid, closer than 100 km to every site but
@@ -23,6 +27,56 @@ const SMALLER: Hypocenter = Hypocenter {
     magnitude: 5.5,
     ..HYPOCENTER
 };
+
+/// A hypocenter under the Izu-Bonin grid that differs from [`HYPOCENTER`] in
+/// every field, so that a binding that gives one row the hypocenter of
+/// another fails on `expected.csv`.
+const ELSEWHERE: Hypocenter = Hypocenter {
+    latitude: 34.9,
+    longitude: 140.1,
+    depth: 50.0,
+    magnitude: 6.8,
+};
+
+/// [`HYPOCENTER`] with an unknown depth, which puts the call out of scope.
+const UNKNOWN_DEPTH: Hypocenter = Hypocenter {
+    depth: f64::NAN,
+    ..HYPOCENTER
+};
+
+/// One call written to `expected.csv`.
+struct ExpectedCall {
+    hypocenter: Hypocenter,
+    offset: f64,
+}
+
+/// The calls written to `expected.csv`, in order.
+const EXPECTED_CALLS: [ExpectedCall; 5] = [
+    ExpectedCall {
+        hypocenter: HYPOCENTER,
+        offset: 0.0,
+    },
+    ExpectedCall {
+        hypocenter: SMALLER,
+        offset: 0.0,
+    },
+    ExpectedCall {
+        hypocenter: HYPOCENTER,
+        offset: 0.2,
+    },
+    ExpectedCall {
+        hypocenter: UNKNOWN_DEPTH,
+        offset: 0.0,
+    },
+    ExpectedCall {
+        hypocenter: ELSEWHERE,
+        offset: 0.0,
+    },
+];
+
+/// The `intensity_class` of a row without an instrumental intensity, as the
+/// C ABI gives it.
+const NO_INTENSITY_CLASS: i32 = -1;
 
 /// Index in [`SITES`] of the site with an invalid ARV.
 const INVALID_ARV_SITE: usize = 5;
@@ -173,6 +227,80 @@ fn assert_close(actual: f64, expected: f64, context: &str) {
     );
 }
 
+/// Returns the text of `expected.csv`: a header, then a row for each site of
+/// [`SITES`] in each call of [`EXPECTED_CALLS`], holding the inputs, the
+/// features, and the prediction from `model.bin`. Numbers are written as
+/// `{:?}` writes them, which reads back as the same bits.
+fn expected_values() -> String {
+    let slabs = sources().slabs;
+    let bundle = ModelBundle::from_bytes(&committed_file()).expect("model.bin should be valid");
+    let mut columns: Vec<String> = [
+        "hypocenter_latitude",
+        "hypocenter_longitude",
+        "hypocenter_depth",
+        "hypocenter_magnitude",
+        "offset",
+        "site_latitude",
+        "site_longitude",
+        "site_arv",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    columns.extend(FEATURE_NAMES.map(|name| format!("feature_{name}")));
+    columns.extend(
+        [
+            "status",
+            "intensity_class",
+            "instrumental",
+            "probability",
+            "regression",
+        ]
+        .map(String::from),
+    );
+    let mut text = columns.join(",");
+    text.push('\n');
+    let number = |value: &f64| format!("{value:?}");
+    for call in &EXPECTED_CALLS {
+        let hypocenter = &call.hypocenter;
+        let options = Options::default().with_offset(call.offset);
+        let results = bundle
+            .predictor()
+            .predict(hypocenter, &SITES, &options)
+            .expect("the call should be valid");
+        assert_eq!(
+            results.len(),
+            SITES.len(),
+            "the zip below would drop results past the last site; {hypocenter:?}"
+        );
+        let pairs = SITES.iter().zip(&results);
+        for (site, result) in pairs {
+            let inputs = [
+                hypocenter.latitude,
+                hypocenter.longitude,
+                hypocenter.depth,
+                hypocenter.magnitude,
+                call.offset,
+                site.latitude,
+                site.longitude,
+                site.arv,
+            ];
+            let mut fields: Vec<String> = inputs.iter().map(number).collect();
+            let feature_values = features::compute(hypocenter, site, &slabs);
+            fields.extend(feature_values.iter().map(number));
+            let class = IntensityClass::from_instrumental(result.instrumental)
+                .map_or(NO_INTENSITY_CLASS, |class| class as i32);
+            fields.push((result.status as i32).to_string());
+            fields.push(class.to_string());
+            let values = [result.instrumental, result.probability, result.regression];
+            fields.extend(values.iter().map(number));
+            text.push_str(&fields.join(","));
+            text.push('\n');
+        }
+    }
+    text
+}
+
 #[test]
 fn packing_the_fixture_sources_gives_the_committed_file() {
     let sources = sources();
@@ -247,4 +375,61 @@ fn committed_file_carries_its_manifest() {
             logit_per_intensity: 1.5,
         }
     );
+}
+
+#[test]
+fn committed_expected_values_match() {
+    let computed = expected_values();
+    if env::var_os("SHINDO_EST_WRITE_EXPECTED").is_some_and(|value| value == "1") {
+        let path = fixture_path("expected.csv");
+        fs::write(&path, &computed).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    }
+    let committed = read("expected.csv");
+    let mut committed_lines = committed.split('\n');
+    let mut computed_lines = computed.split('\n');
+    for line_number in 1.. {
+        match (committed_lines.next(), computed_lines.next()) {
+            (None, None) => break,
+            (committed_line, computed_line) if committed_line == computed_line => {}
+            (committed_line, computed_line) => panic!(
+                "line {line_number} differs: expected.csv has {committed_line:?}, the library \
+                 gives {computed_line:?}; see tests/fixtures/bundle/README.md"
+            ),
+        }
+    }
+}
+
+#[test]
+fn expected_values_cover_every_status() {
+    let text = expected_values();
+    let lines: Vec<Vec<&str>> = text.lines().map(|line| line.split(',').collect()).collect();
+    let (header, rows) = lines.split_first().expect("there is a header");
+    assert_eq!(header.len(), 27);
+    assert_eq!(rows.len(), 30);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.len(), 27, "row {index}");
+    }
+    let column = |name| {
+        header
+            .iter()
+            .position(|column| *column == name)
+            .unwrap_or_else(|| panic!("no column {name}"))
+    };
+    let status = column("status");
+    for code in ["0", "1", "2"] {
+        assert!(
+            rows.iter().any(|row| row[status] == code),
+            "no row has status {code}"
+        );
+    }
+    let class = column("intensity_class");
+    let no_class = NO_INTENSITY_CLASS.to_string();
+    assert!(
+        rows.iter().any(|row| row[class] == no_class),
+        "no row is without an intensity class"
+    );
+    let hypocenters: BTreeSet<&[&str]> = rows.iter().map(|row| &row[..4]).collect();
+    assert!(hypocenters.len() >= 4, "{hypocenters:?}");
+    let positions: BTreeSet<&[&str]> = rows.iter().map(|row| &row[..2]).collect();
+    assert!(positions.len() >= 2, "{positions:?}");
 }
