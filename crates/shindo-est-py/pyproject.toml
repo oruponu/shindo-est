@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "shindo-est"
+description = "Predicts JMA instrumental seismic intensities at sites for a given earthquake."
+license = "MIT"
+requires-python = ">=3.15"
+dependencies = ["numpy>=2.5"]
+dynamic = ["version"]
+
+[dependency-groups]
+dev = ["maturin==1.16.0", "numpy==2.5.4"]
+
+[tool.maturin]
+module-name = "shindo_est"
