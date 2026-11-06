@@ -4,8 +4,12 @@
 //! their Python docstrings, so they follow the Google Python style. The types
 //! are in the hand-written stub `shindo_est.pyi`.
 
+mod arrays;
 mod errors;
+mod hypocenter;
 mod intensity;
+mod model;
+mod prediction;
 
 use pyo3::pymodule;
 
@@ -20,7 +24,13 @@ mod shindo_est {
     #[pymodule_export]
     use crate::errors::{InputError, ModelFileError, SlabGridError};
     #[pymodule_export]
+    use crate::hypocenter::Hypocenter;
+    #[pymodule_export]
     use crate::intensity::{intensity_class, intensity_label};
+    #[pymodule_export]
+    use crate::model::Model;
+    #[pymodule_export]
+    use crate::prediction::Prediction;
 
     /// The version of the features the models take.
     #[pymodule_export]

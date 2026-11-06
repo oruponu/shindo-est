@@ -48,14 +48,14 @@ pub fn intensity_class<'py>(
     instrumental: PyArrayLike1<'py, f64, AllowTypeChange>,
 ) -> Bound<'py, PyArray1<i32>> {
     let values = instrumental.as_array();
-    let classes: Vec<i32> = values
-        .iter()
-        .map(|&value| {
-            IntensityClass::from_instrumental(value)
-                .map_or(NO_INTENSITY_CLASS, |class| class as i32)
-        })
-        .collect();
+    let classes: Vec<i32> = values.iter().copied().map(class_number).collect();
     PyArray1::from_vec(py, classes)
+}
+
+/// Returns the class of an instrumental intensity, 0 to 9, or -1 for NaN.
+#[must_use]
+pub(crate) fn class_number(instrumental: f64) -> i32 {
+    IntensityClass::from_instrumental(instrumental).map_or(NO_INTENSITY_CLASS, |class| class as i32)
 }
 
 /// Returns the label of a JMA seismic intensity class, such as "5-".
