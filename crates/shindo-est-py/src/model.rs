@@ -128,10 +128,13 @@ impl Model {
     ///
     /// Raises:
     ///     `InputError`: The hypocenter or the offset is invalid.
-    ///     `ValueError`: The site arrays differ in length, or `max_threads`
-    ///         is below 1.
-    ///     `TypeError`: A site array is not one-dimensional, or `max_threads`
-    ///         is not an integer.
+    ///     `ValueError`: The site arrays differ in length, `max_threads` is
+    ///         below 1, or NumPy cannot convert an element to a float, as with
+    ///         a string that is not a number.
+    ///     `TypeError`: `hypocenter` is not a `Hypocenter`, `offset` is not a
+    ///         number, `max_threads` is not an integer, a site array is not
+    ///         one-dimensional, or an element has a type that NumPy cannot
+    ///         convert to a float.
     #[pyo3(signature = (
         hypocenter,
         site_latitude,

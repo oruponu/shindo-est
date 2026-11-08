@@ -1,0 +1,2 @@
+# NumPy is a name in the docstrings that Python shows, not code to quote.
+doc-valid-idents = ["NumPy", ".."]

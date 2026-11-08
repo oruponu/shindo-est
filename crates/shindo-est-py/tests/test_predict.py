@@ -213,6 +213,29 @@ class PredictTest(unittest.TestCase):
                         self.hypocenter, latitudes, [140.0] * 4, [1.0] * 4
                     )
 
+    def test_rejects_elements_that_are_not_numbers(self):
+        # NumPy raises ValueError for a string that is not a number, and
+        # TypeError for an object of a type it cannot convert.
+        for value, error in [("abc", ValueError), (object(), TypeError)]:
+            with self.subTest(value=value):
+                with self.assertRaises(error):
+                    self.model.predict(self.hypocenter, [value], [140.0], [1.0])
+
+    def test_rejects_arguments_of_other_types(self):
+        call = self.calls[0]
+        with self.subTest(argument="hypocenter"):
+            with self.assertRaises(TypeError):
+                self.model.predict(
+                    (35.02, 140.02, 80.0, 6.5),
+                    call.site_latitude,
+                    call.site_longitude,
+                    call.site_arv,
+                )
+        for name, value in [("offset", "0.2"), ("max_threads", 1.5)]:
+            with self.subTest(argument=name):
+                with self.assertRaises(TypeError):
+                    self.predict_first_call(**{name: value})
+
     def test_invalid_hypocenters_raise_input_error(self):
         cases = [
             (

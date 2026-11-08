@@ -89,8 +89,10 @@ impl SlabGeometry {
     ///     column for each name in `FEATURE_NAMES`, in that order.
     ///
     /// Raises:
-    ///     `ValueError`: The arrays differ in length.
-    ///     `TypeError`: An array is not one-dimensional.
+    ///     `ValueError`: The arrays differ in length, or NumPy cannot convert
+    ///         an element to a float, as with a string that is not a number.
+    ///     `TypeError`: An array is not one-dimensional, or an element has a
+    ///         type that NumPy cannot convert to a float.
     #[pyo3(signature = (
         *,
         hypocenter_latitude,

@@ -184,6 +184,15 @@ class FeaturesTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.slabs.features(**rows)
 
+    def test_rejects_elements_that_are_not_numbers(self):
+        # NumPy raises ValueError for a string that is not a number, and
+        # TypeError for an object of a type it cannot convert.
+        for value, error in [("abc", ValueError), (object(), TypeError)]:
+            with self.subTest(value=value):
+                rows = dict(_ROWS, site_arv=(value, 2.0, 0.5))
+                with self.assertRaises(error):
+                    self.slabs.features(**rows)
+
     def test_arguments_are_keyword_only(self):
         with self.assertRaises(TypeError):
             self.slabs.features(*_ROWS.values())

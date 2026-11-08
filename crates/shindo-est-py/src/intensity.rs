@@ -36,7 +36,10 @@ const CLASSES: [IntensityClass; 10] = [
 ///     intensity is NaN.
 ///
 /// Raises:
-///     `TypeError`: `instrumental` is not one-dimensional.
+///     `ValueError`: NumPy cannot convert an element to a float, as with a
+///         string that is not a number.
+///     `TypeError`: `instrumental` is not one-dimensional, or an element has
+///         a type that NumPy cannot convert to a float.
 #[pyfunction]
 #[must_use]
 #[expect(

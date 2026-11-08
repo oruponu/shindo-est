@@ -55,6 +55,14 @@ class IntensityClassTest(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     shindo_est.intensity_class(values)
 
+    def test_rejects_elements_that_are_not_numbers(self):
+        # NumPy raises ValueError for a string that is not a number, and
+        # TypeError for an object of a type it cannot convert.
+        for value, error in [("abc", ValueError), (object(), TypeError)]:
+            with self.subTest(value=value):
+                with self.assertRaises(error):
+                    shindo_est.intensity_class([value])
+
 
 class IntensityLabelTest(unittest.TestCase):
 
