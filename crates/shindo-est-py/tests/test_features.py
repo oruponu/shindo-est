@@ -57,6 +57,13 @@ def _many_rows():
     }
 
 
+def _read_only(values):
+    """Returns the values as an array that cannot be written to."""
+    array = np.array(values, dtype=np.float64)
+    array.flags.writeable = False
+    return array
+
+
 def _column(name):
     return shindo_est.FEATURE_NAMES.index(name)
 
@@ -125,10 +132,11 @@ class FeaturesTest(unittest.TestCase):
                 features[row, _column("log_arv")], math.log10(arv), delta=1e-15
             )
 
-    def test_accepts_lists_float32_and_strided_arrays(self):
+    def test_accepts_lists_float32_read_only_and_strided_arrays(self):
         forms = {
             "list": list,
             "float32": lambda values: np.array(values, dtype=np.float32),
+            "read-only": _read_only,
             "strided": lambda values: np.repeat(np.array(values), 2)[::2],
         }
         wanted = self.slabs.features(
@@ -140,6 +148,30 @@ class FeaturesTest(unittest.TestCase):
                     **{name: form(values) for name, values in _ROWS.items()}
                 )
                 self.assert_same_features(features, wanted, form_name)
+
+    def test_accepts_integer_arrays(self):
+        rows = {
+            "hypocenter_latitude": [35, 35],
+            "hypocenter_longitude": [140, 140],
+            "hypocenter_depth": [40, 40],
+            "hypocenter_magnitude": [7, 7],
+            "site_latitude": [35, 36],
+            "site_longitude": [141, 140],
+            "site_arv": [1, 2],
+        }
+        integers = {
+            name: np.array(values, dtype=np.int64)
+            for name, values in rows.items()
+        }
+        floats = {
+            name: values.astype(np.float64)
+            for name, values in integers.items()
+        }
+        self.assert_same_features(
+            self.slabs.features(**integers),
+            self.slabs.features(**floats),
+            "int64",
+        )
 
     def test_rejects_arrays_of_different_lengths(self):
         rows = dict(_ROWS, site_arv=(1.0, 2.0))

@@ -30,6 +30,13 @@ def _strided(values):
     return doubled[::2]
 
 
+def _read_only(values):
+    """Returns the values as an array that cannot be written to."""
+    array = np.array(values, dtype=np.float64)
+    array.flags.writeable = False
+    return array
+
+
 def _grid():
     """Returns 600 sites on a grid over the fixture's slab grids.
 
@@ -147,10 +154,11 @@ class PredictTest(unittest.TestCase):
                 self.assertEqual(array.dtype, dtype)
                 self.assertEqual(array.shape, (6,))
 
-    def test_accepts_lists_float32_and_strided_arrays(self):
+    def test_accepts_lists_float32_read_only_and_strided_arrays(self):
         forms = {
             "list": list,
             "float32": lambda values: np.array(values, dtype=np.float32),
+            "read-only": _read_only,
             "strided": _strided,
         }
         wanted = self.model.predict(
@@ -168,6 +176,19 @@ class PredictTest(unittest.TestCase):
                     form(_ARVS),
                 )
                 self.assert_same_results(prediction, wanted, name)
+
+    def test_accepts_integer_arrays(self):
+        # Two sites at a whole-degree point over the fixture grids.
+        integers = [
+            np.array(values, dtype=np.int64)
+            for values in ([35, 35], [140, 140], [1, 2])
+        ]
+        floats = [values.astype(np.float64) for values in integers]
+        prediction = self.model.predict(self.hypocenter, *integers)
+        self.assertEqual(prediction.status.tolist(), [shindo_est.STATUS_OK] * 2)
+        self.assert_same_results(
+            prediction, self.model.predict(self.hypocenter, *floats), "int64"
+        )
 
     def test_no_sites_give_empty_results(self):
         prediction = self.model.predict(self.hypocenter, [], [], [])

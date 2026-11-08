@@ -27,11 +27,14 @@ class IntensityClassTest(unittest.TestCase):
         self.assertEqual(classes.shape, (3,))
         self.assertEqual(shindo_est.intensity_class([]).shape, (0,))
 
-    def test_accepts_lists_float32_and_strided_arrays(self):
+    def test_accepts_lists_float32_read_only_and_strided_arrays(self):
         strided = np.arange(8.0)[::2]
+        read_only = np.array([0.5, 4.5])
+        read_only.flags.writeable = False
         cases = [
             ([0.5, 4.5], np.array([0.5, 4.5])),
             (np.array([0.5, 4.5], dtype=np.float32), np.array([0.5, 4.5])),
+            (read_only, np.array([0.5, 4.5])),
             (strided, np.ascontiguousarray(strided)),
         ]
         for values, contiguous in cases:
@@ -40,6 +43,11 @@ class IntensityClassTest(unittest.TestCase):
                     shindo_est.intensity_class(values).tolist(),
                     shindo_est.intensity_class(contiguous).tolist(),
                 )
+
+    def test_accepts_integer_arrays(self):
+        integers = np.array([0, 4, 7], dtype=np.int64)
+        classes = shindo_est.intensity_class(integers)
+        self.assertEqual(classes.tolist(), [0, 4, 9])
 
     def test_rejects_arrays_that_are_not_one_dimensional(self):
         for values in [np.zeros((2, 2)), 3.0]:
