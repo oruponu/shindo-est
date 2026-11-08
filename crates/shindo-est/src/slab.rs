@@ -363,8 +363,8 @@ impl SlabGeometry {
     ///
     /// The path is split into 60 equal segments, and a segment counts when its
     /// midpoint is between the slab top and bottom, measured perpendicular to
-    /// the slab. Midpoints without slab values and an unknown hypocenter depth
-    /// count as outside.
+    /// the slab. Midpoints without slab values count as outside, so the
+    /// fraction is 0 when a coordinate of the hypocenter or the site is NaN.
     #[must_use]
     pub fn pacific_path_fraction(
         &self,

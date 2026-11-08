@@ -38,8 +38,8 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
 /// Returns the features of a hypocenter and a site, in the order of
 /// [`FEATURE_NAMES`].
 ///
-/// Unknown values (NaN) pass through as NaN, except that the path fraction of
-/// a hypocenter with an unknown depth is 0.
+/// Unknown values (NaN) propagate to the features that depend on them, except
+/// that the path fraction is 0 when any latitude, longitude, or depth is NaN.
 #[must_use]
 pub fn compute(hypocenter: &Hypocenter, site: &Site, slabs: &SlabGeometry) -> [f64; FEATURE_COUNT] {
     let distances = geodesy::distances(hypocenter, site.latitude, site.longitude);
@@ -284,6 +284,38 @@ mod tests {
         let values = features(&hypocenter(36.5, 140.0, 320.0), &site(36.5, 140.0));
 
         assert_close(feature(&values, "path_frac"), 4.0 / 60.0, 1e-12);
+    }
+
+    #[test]
+    fn unknown_coordinates_give_zero_path_fraction() {
+        // With every value known, the path is in the slab at 4 of its 60
+        // midpoints, as in path_fraction_uses_the_geometry.
+        let cases = [
+            (
+                "hypocenter latitude",
+                features(&hypocenter(f64::NAN, 140.0, 320.0), &site(36.5, 140.0)),
+            ),
+            (
+                "hypocenter longitude",
+                features(&hypocenter(36.5, f64::NAN, 320.0), &site(36.5, 140.0)),
+            ),
+            (
+                "hypocenter depth",
+                features(&hypocenter(36.5, 140.0, f64::NAN), &site(36.5, 140.0)),
+            ),
+            (
+                "site latitude",
+                features(&hypocenter(36.5, 140.0, 320.0), &site(f64::NAN, 140.0)),
+            ),
+            (
+                "site longitude",
+                features(&hypocenter(36.5, 140.0, 320.0), &site(36.5, f64::NAN)),
+            ),
+        ];
+        for (unknown, values) in cases {
+            let path_frac = feature(&values, "path_frac");
+            assert!(path_frac == 0.0, "unknown {unknown}: {path_frac}");
+        }
     }
 
     #[test]
