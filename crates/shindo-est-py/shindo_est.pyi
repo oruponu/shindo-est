@@ -73,3 +73,21 @@ class Model:
         offset: float = 0.0,
         max_threads: int | None = None,
     ) -> Prediction: ...
+
+@final
+class SlabGeometry:
+    @staticmethod
+    def read(
+        kuril: str | os.PathLike[str], izu_bonin: str | os.PathLike[str]
+    ) -> SlabGeometry: ...
+    def features(
+        self,
+        *,
+        hypocenter_latitude: npt.ArrayLike,
+        hypocenter_longitude: npt.ArrayLike,
+        hypocenter_depth: npt.ArrayLike,
+        hypocenter_magnitude: npt.ArrayLike,
+        site_latitude: npt.ArrayLike,
+        site_longitude: npt.ArrayLike,
+        site_arv: npt.ArrayLike,
+    ) -> npt.NDArray[np.float64]: ...

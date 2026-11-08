@@ -7,7 +7,7 @@ use std::path::Path;
 
 use pyo3::PyErr;
 use pyo3::exceptions::PyValueError;
-use shindo_est::{FormatError, ReadError};
+use shindo_est::{FormatError, ReadError, SlabError};
 
 pyo3::create_exception!(
     shindo_est,
@@ -67,6 +67,12 @@ pub(crate) fn from_read_error(path: &Path, error: ReadError) -> PyErr {
         // Any kind of error the core adds later is reported as a failed read.
         error => from_io_error(path, &io::Error::other(error)),
     }
+}
+
+/// Returns the `SlabGridError` for the invalid grid at `path`.
+#[must_use]
+pub(crate) fn from_slab_error(path: &Path, error: &SlabError) -> PyErr {
+    SlabGridError::new_err(format!("{}: {}", path.display(), describe(error)))
 }
 
 /// Returns the subclass of `OSError` for the kind of `error`, such as

@@ -10,10 +10,12 @@ mod hypocenter;
 mod intensity;
 mod model;
 mod prediction;
+mod slabs;
 
 use pyo3::pymodule;
 
-/// Predicts JMA instrumental seismic intensities at sites for a given earthquake.
+/// Predicts JMA instrumental seismic intensities at sites for a given earthquake,
+/// and computes the features of training rows.
 #[pymodule(name = "shindo_est")]
 mod shindo_est {
     use ::shindo_est::PointStatus;
@@ -31,6 +33,8 @@ mod shindo_est {
     use crate::model::Model;
     #[pymodule_export]
     use crate::prediction::Prediction;
+    #[pymodule_export]
+    use crate::slabs::SlabGeometry;
 
     /// The version of the features the models take.
     #[pymodule_export]
