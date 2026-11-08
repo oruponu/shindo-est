@@ -14,6 +14,7 @@ import numpy as np
 
 import shindo_est
 from tests import expected
+from tests import gil
 
 _ARRAYS = ("status", "intensity_class") + expected.FLOAT_ARRAYS
 
@@ -40,6 +41,11 @@ def _grid():
     )
     latitudes = latitudes.ravel()
     return latitudes, longitudes.ravel(), np.ones_like(latitudes)
+
+
+def _many_sites():
+    """Returns `_grid()` repeated to 6,000 sites, to keep a call busy."""
+    return tuple(np.tile(values, 10) for values in _grid())
 
 
 class PredictTest(unittest.TestCase):
@@ -293,6 +299,18 @@ class PredictTest(unittest.TestCase):
                 call.site_arv,
                 0.2,
             )
+
+    @unittest.skipUnless(gil.is_enabled(), "the GIL is disabled")
+    def test_releases_the_gil(self):
+        sites = _many_sites()
+        # One thread makes the call take about the same time on any machine.
+        self.assertTrue(
+            gil.is_released_during(
+                lambda: self.model.predict(
+                    self.hypocenter, *sites, max_threads=1
+                )
+            )
+        )
 
     def test_threads_can_share_a_model(self):
         sites = _grid()
