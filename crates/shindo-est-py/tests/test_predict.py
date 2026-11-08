@@ -8,6 +8,7 @@ invalid and out-of-scope calls, and threads.
 
 import concurrent.futures
 import math
+import pickle
 import unittest
 
 import numpy as np
@@ -116,6 +117,11 @@ class PredictTest(unittest.TestCase):
             repr(self.predict_first_call()),
             "Prediction(model_id='synthetic-fixture', offset=0.0, sites=6)",
         )
+
+    def test_prediction_is_not_picklable(self):
+        prediction = self.predict_first_call()
+        with self.assertRaises(TypeError):
+            pickle.dumps(prediction)
 
     def test_attributes_cannot_be_replaced(self):
         prediction = self.predict_first_call()

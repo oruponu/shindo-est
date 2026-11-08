@@ -5,6 +5,7 @@
 Uses the fixture model in tests/fixtures/bundle and temporary copies of it.
 """
 
+import copy
 import hashlib
 import math
 import pathlib
@@ -174,6 +175,56 @@ class HypocenterTest(unittest.TestCase):
         hypocenter = shindo_est.Hypocenter(35.02, 140.02, 80.0, 6.5)
         with self.assertRaises(AttributeError):
             hypocenter.depth = 1.0
+
+    def test_equals_a_hypocenter_with_the_same_values(self):
+        hypocenter = shindo_est.Hypocenter(35.02, 140.02, 80.0, 6.5)
+        same = shindo_est.Hypocenter(35.02, 140.02, 80.0, 6.5)
+        self.assertEqual(hypocenter, same)
+        self.assertEqual({hypocenter: "found"}[same], "found")
+        others = [
+            shindo_est.Hypocenter(35.03, 140.02, 80.0, 6.5),
+            shindo_est.Hypocenter(35.02, 140.03, 80.0, 6.5),
+            shindo_est.Hypocenter(35.02, 140.02, 81.0, 6.5),
+            shindo_est.Hypocenter(35.02, 140.02, 80.0, 6.6),
+            (35.02, 140.02, 80.0, 6.5),
+        ]
+        for other in others:
+            with self.subTest(other=other):
+                self.assertNotEqual(hypocenter, other)
+
+    def test_zero_and_negative_zero_are_equal(self):
+        surface = shindo_est.Hypocenter(35.02, 140.02, 0.0, 6.5)
+        negative = shindo_est.Hypocenter(35.02, 140.02, -0.0, 6.5)
+        self.assertEqual(surface, negative)
+        self.assertEqual(hash(surface), hash(negative))
+
+    def test_nan_is_unequal_as_in_a_float(self):
+        unknown_depth = shindo_est.Hypocenter(35.02, 140.02, math.nan, 6.5)
+        same = shindo_est.Hypocenter(35.02, 140.02, math.nan, 6.5)
+        self.assertNotEqual(unknown_depth, same)
+        self.assertNotEqual(unknown_depth, unknown_depth)
+        # A set finds the same object by identity, as with a NaN float.
+        self.assertIn(unknown_depth, {unknown_depth})
+
+    def test_can_be_pickled_and_copied(self):
+        hypocenters = [
+            shindo_est.Hypocenter(35.02, 140.02, 80.0, 6.5),
+            shindo_est.Hypocenter(35.02, 140.02, math.nan, 6.5),
+            shindo_est.Hypocenter(35.02, 140.02, -0.0, 6.5),
+        ]
+        ways = {
+            "pickle": lambda value: pickle.loads(pickle.dumps(value)),
+            "copy": copy.copy,
+            "deepcopy": copy.deepcopy,
+        }
+        for hypocenter in hypocenters:
+            for name, way in ways.items():
+                with self.subTest(hypocenter=hypocenter, way=name):
+                    copied = way(hypocenter)
+                    self.assertIs(type(copied), shindo_est.Hypocenter)
+                    # Compared by repr, since a NaN value makes them unequal
+                    # and -0.0 equals 0.0.
+                    self.assertEqual(repr(copied), repr(hypocenter))
 
 
 if __name__ == "__main__":

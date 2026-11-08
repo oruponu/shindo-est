@@ -1,9 +1,15 @@
 //! The hypocenter of a call to `Model.predict`.
 
+use std::hash::DefaultHasher;
+
 use pyo3::types::PyFloat;
 use pyo3::{PyResult, Python, pyclass, pymethods};
 
 /// The hypocenter of an earthquake, an immutable value.
+///
+/// Hypocenters are equal when their values are equal as floats, so a NaN
+/// value makes them unequal. Equal hypocenters hash alike, so they can be
+/// dictionary keys, and a hypocenter can be pickled.
 ///
 /// Args:
 ///     latitude: The latitude in degrees, from -90 to 90.
@@ -36,6 +42,28 @@ impl Hypocenter {
             depth,
             magnitude,
         }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.to_core() == other.to_core()
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        for value in [self.latitude, self.longitude, self.depth, self.magnitude] {
+            // 0.0 and -0.0 are equal, so they must hash alike.
+            let value = if value == 0.0 { 0.0 } else { value };
+            value.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Returns the arguments of the constructor, so that `pickle` and
+    /// `copy` can make this hypocenter again.
+    fn __getnewargs__(&self) -> (f64, f64, f64, f64) {
+        (self.latitude, self.longitude, self.depth, self.magnitude)
     }
 
     /// Returns the call that makes this hypocenter, with each value as

@@ -11,7 +11,8 @@ use crate::intensity;
 ///
 /// The attributes cannot be replaced. The arrays are new for each call and
 /// belong to the caller, and an attribute returns the same array each time,
-/// so changes to its elements stay in it.
+/// so changes to its elements stay in it. A prediction cannot be pickled;
+/// to return one from another process, return its arrays.
 #[pyclass(frozen, module = "shindo_est")]
 pub struct Prediction {
     /// The ID of the model that made the prediction.
