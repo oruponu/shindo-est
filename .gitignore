@@ -2,3 +2,4 @@
 __pycache__/
 training/.venv/
 crates/shindo-est-py/.venv/
+training/data/

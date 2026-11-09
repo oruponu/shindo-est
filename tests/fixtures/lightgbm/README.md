@@ -34,15 +34,20 @@ Files in each directory:
 
 ## Regenerating
 
-The files were generated on Linux (Ubuntu 26.04 under WSL, Python 3.14) with
-the versions in `training/requirements.txt` (LightGBM 4.7.0, NumPy 2.5.4).
-Running the script twice there gives the same bytes. On another OS, CPU, or
-LightGBM build, the trained trees themselves may differ. The three files of a
-model still agree with each other, because the inputs and predictions are made
-from the saved model.
+The files were generated on Linux (Ubuntu 26.04 under WSL) with LightGBM 4.7.0
+and NumPy 2.5.4, the versions specified in `training/requirements.txt`.
+Running the script in that environment with Python 3.15 produces byte-for-byte
+identical files. On a different OS or CPU, or with a different LightGBM build,
+the trained trees may differ. The three files for each model remain consistent
+with one another because the predictions are computed using the saved model
+and the test inputs targeting split nodes are chosen based on that model's
+trees.
 
 ```bash
-python3 -m venv training/.venv
+python3.15 -m venv training/.venv
 training/.venv/bin/python -m pip install -r training/requirements.txt
 training/.venv/bin/python training/fixtures/make_lightgbm_fixtures.py tests/fixtures/lightgbm
 ```
+
+Unlike the rest of the training code, this script does not require the
+`shindo_est` extension.
