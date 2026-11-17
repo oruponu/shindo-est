@@ -21,6 +21,10 @@ import shindo_est
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES = REPOSITORY / "tests" / "fixtures" / "bundle"
 EXPECTED = FIXTURES / "expected.csv"
+SLAB_GRIDS = (
+    REPOSITORY / "data" / "slab2" / "kur.csv",
+    REPOSITORY / "data" / "slab2" / "izu.csv",
+)
 FEATURE_NAMES = (
     "mj",
     "depth",
@@ -107,7 +111,7 @@ def check_extension(expected: pathlib.Path = EXPECTED) -> None:
 
 
 def read_slabs() -> shindo_est.SlabGeometry:
-    """Reads the repository's Pacific slab grids.
+    """Reads the repository's Pacific slab grids, SLAB_GRIDS.
 
     Returns:
         The slab geometry of data/slab2.
@@ -116,10 +120,7 @@ def read_slabs() -> shindo_est.SlabGeometry:
         OSError: A grid file cannot be read.
         shindo_est.SlabGridError: A grid file is not a valid grid.
     """
-    directory = REPOSITORY / "data" / "slab2"
-    return shindo_est.SlabGeometry.read(
-        directory / "kur.csv", directory / "izu.csv"
-    )
+    return shindo_est.SlabGeometry.read(*SLAB_GRIDS)
 
 
 def compute(

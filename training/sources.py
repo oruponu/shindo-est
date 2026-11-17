@@ -132,7 +132,7 @@ def record(
                 f"{path.name} is recorded already; check the file with"
                 " `python -m training.sources verify` instead"
             )
-        added[path.name] = _file_sha256(path)
+        added[path.name] = file_sha256(path)
     sums.update(added)
     text = "".join(f"{sums[name]}  {name}\n" for name in sorted(sums))
     with _temporary_file(sums_path.parent, text.encode("ascii")) as temporary:
@@ -199,6 +199,22 @@ def fetch(
     if new_paths:
         record(new_paths, sums_path)
     return paths + new_paths
+
+
+def file_sha256(path: pathlib.Path) -> str:
+    """Returns the SHA-256 of a file as lowercase hexadecimal.
+
+    Args:
+        path: The file.
+
+    Raises:
+        OSError: The file cannot be read.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while block := file.read(_BLOCK_BYTES):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -334,7 +350,7 @@ def _temporary_file(
 
 
 def _check(path: pathlib.Path, expected: str) -> None:
-    actual = _file_sha256(path)
+    actual = file_sha256(path)
     if actual != expected:
         raise SourceError(_mismatch(path, actual, expected))
 
@@ -344,14 +360,6 @@ def _mismatch(path: pathlib.Path, actual: str, expected: str) -> str:
         f"{path}: SHA-256 {actual} differs from {expected} in SHA256SUMS;"
         " the source may have been replaced"
     )
-
-
-def _file_sha256(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while block := file.read(_BLOCK_BYTES):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _read_url(url: str) -> bytes:
