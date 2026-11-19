@@ -3,7 +3,6 @@
 """Tests that ARVs are read from the ground data at the station meshes."""
 
 import contextlib
-import fractions
 import hashlib
 import io
 import pathlib
@@ -30,6 +29,7 @@ _JSHIS_COMMENTS = [
 _STATIONS = (
     "7654321\tTest\t3520\t13900\t199604011200\t\n"
     "7654322\tOther\t3540\t13945\t199604011200\t\n"
+    "7654323\tUnplaced\t0000\t00000\t199501179999\t199501189999\n"
 )
 _FIRST = "5339000011"
 _SECOND = "5339460011"
@@ -165,24 +165,46 @@ class ArvTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "ground.zip"):
                         read(path, {_FIRST})
 
-    def test_station_arv_leaves_out_missing_meshes(self):
+    def test_station_meshes_hold_the_stations(self):
         stations = [
             _station("7654321", 2120, 8340),
             _station("7654322", 2160, 8400),
         ]
-        code = mesh.code_250m(
-            fractions.Fraction(2120, 60), fractions.Fraction(8340, 60)
-        )
 
         self.assertEqual(
-            arv.station_arv(stations, {code: 1.25}), {"7654321": 1.25}
+            arv.station_meshes(stations),
+            {
+                "7654321": mesh.station_code(stations[0]),
+                "7654322": mesh.station_code(stations[1]),
+            },
         )
 
-    def test_station_arv_rejects_repeated_numbers(self):
-        stations = [_station("7654321", 2120, 8340)] * 2
+    def test_station_meshes_leave_out_stations_outside_the_meshes(self):
+        stations = [_station("7654321", 2120, 8340), _station("7654322", 0, 0)]
 
-        with self.assertRaisesRegex(ValueError, "7654321"):
-            arv.station_arv(stations, {})
+        with self.assertLogs("training.arv", level="WARNING") as logs:
+            meshes = arv.station_meshes(stations)
+
+        self.assertEqual(list(meshes), ["7654321"])
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("7654322", logs.output[0])
+        self.assertIn("outside the first-order meshes", logs.output[0])
+
+    def test_station_meshes_reject_repeated_numbers(self):
+        for stations in (
+            [_station("7654321", 2120, 8340)] * 2,
+            [_station("7654321", 0, 0), _station("7654321", 2120, 8340)],
+        ):
+            with self.subTest(stations=stations):
+                with self.assertRaisesRegex(ValueError, "7654321"):
+                    arv.station_meshes(stations)
+
+    def test_station_arv_leaves_out_missing_meshes(self):
+        meshes = {"7654321": _FIRST, "7654322": _SECOND}
+
+        self.assertEqual(
+            arv.station_arv(meshes, {_FIRST: 1.25}), {"7654321": 1.25}
+        )
 
     def test_table_round_trips(self):
         table = {
@@ -248,7 +270,10 @@ class ArvTest(unittest.TestCase):
         out = self.root / "arv.csv"
         output = io.StringIO()
 
-        with contextlib.redirect_stdout(output):
+        with (
+            contextlib.redirect_stdout(output),
+            self.assertLogs("training.arv", level="WARNING") as logs,
+        ):
             status = arv.main([
                 "--sums", str(self.root / "SHA256SUMS"),
                 "--jma", str(jma),
@@ -259,12 +284,18 @@ class ArvTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(
             arv.read_table(out),
-            {"7654321": (1.514, 0.8125), "7654322": (None, 1.25)},
+            {
+                "7654321": (1.514, 0.8125),
+                "7654322": (None, 1.25),
+                "7654323": (None, None),
+            },
         )
         self.assertIn(
-            str(arv.Coverage(stations=2, cabinet_office=1, jshis=2, both=1)),
+            str(arv.Coverage(stations=3, cabinet_office=1, jshis=2, both=1)),
             output.getvalue(),
         )
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("7654323", logs.output[0])
 
     def test_cli_verifies_the_sources(self):
         jma, ground, sums = self._sources()

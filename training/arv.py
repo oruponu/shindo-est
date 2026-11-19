@@ -155,32 +155,52 @@ def read_jshis(
     return table
 
 
-def station_arv(
-    stations: Iterable[bulletin.Station], table: Mapping[str, float]
-) -> dict[str, float]:
-    """Looks up the ARV of each station at its mesh.
+def station_meshes(stations: Iterable[bulletin.Station]) -> dict[str, str]:
+    """Finds the 250 m mesh holding each station.
+
+    A station outside the first-order meshes, such as one whose position is
+    written as zero, has no mesh and so no ARV. It is logged and left out.
 
     Args:
         stations: The stations.
-        table: The ARV of each mesh code.
 
     Returns:
-        The ARV of each station number whose mesh is in table.
+        The mesh code of each station number, for the stations inside the
+        first-order meshes.
 
     Raises:
-        ValueError: Two stations have the same number, or a station is
-            outside the first-order meshes.
+        ValueError: Two stations have the same number.
     """
-    values: dict[str, float] = {}
+    meshes: dict[str, str] = {}
     numbers: set[str] = set()
     for station in stations:
         if station.number in numbers:
             raise ValueError(f"station {station.number} appears twice")
         numbers.add(station.number)
-        value = table.get(mesh.station_code(station))
-        if value is not None:
-            values[station.number] = value
-    return values
+        try:
+            meshes[station.number] = mesh.station_code(station)
+        except ValueError as error:
+            _logger.warning("station %s has no ARV: %s", station.number, error)
+    return meshes
+
+
+def station_arv(
+    meshes: Mapping[str, str], table: Mapping[str, float]
+) -> dict[str, float]:
+    """Looks up the ARV of each station at its mesh.
+
+    Args:
+        meshes: The mesh code of each station number.
+        table: The ARV of each mesh code.
+
+    Returns:
+        The ARV of each station number whose mesh is in table.
+    """
+    return {
+        number: table[code]
+        for number, code in meshes.items()
+        if code in table
+    }
 
 
 def write_table(
@@ -267,11 +287,12 @@ def build(
     for path in (station_list, cabinet_office_path, jshis_path):
         sources.verify(path, sums)
     stations = bulletin.read_stations(bulletin.read_zip(station_list))
-    meshes = {mesh.station_code(station) for station in stations}
+    meshes = station_meshes(stations)
+    codes = set(meshes.values())
     cabinet_office = station_arv(
-        stations, read_cabinet_office(cabinet_office_path, meshes)
+        meshes, read_cabinet_office(cabinet_office_path, codes)
     )
-    jshis = station_arv(stations, read_jshis(jshis_path, meshes))
+    jshis = station_arv(meshes, read_jshis(jshis_path, codes))
     write_table(
         out,
         {
