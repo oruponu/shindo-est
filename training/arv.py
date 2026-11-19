@@ -70,8 +70,9 @@ def read_cabinet_office(
 ) -> dict[str, float]:
     """Reads the ARV of some meshes from the Cabinet Office's increments.
 
-    The CSV file holds the quoted mesh code, the increment one sigma below
-    the mean, the mean increment, the longitude, and the latitude.
+    The CSV file, in CP932 as distributed, holds the quoted mesh code, the
+    increment one sigma below the mean, the mean increment, the longitude,
+    and the latitude.
 
     Args:
         path: The ZIP file holding the CSV file.
@@ -81,8 +82,8 @@ def read_cabinet_office(
         The ARV of each mesh in meshes whose increment is a finite number.
 
     Raises:
-        ValueError: The ZIP file does not hold exactly one CSV file, the
-            file is not UTF-8, or a mesh in meshes appears twice.
+        ValueError: The ZIP file does not hold exactly one CSV file, the file
+            cannot be decoded as CP932, or a mesh in meshes appears twice.
         zipfile.BadZipFile: The file is not a ZIP file.
         OSError: The file cannot be read.
     """
@@ -91,7 +92,7 @@ def read_cabinet_office(
     seen: set[str] = set()
     with (
         _open_csv(path) as file,
-        io.TextIOWrapper(file, encoding="utf-8", newline="") as text,
+        io.TextIOWrapper(file, encoding="cp932", newline="") as text,
     ):
         for line in text:
             if not line.startswith('"'):

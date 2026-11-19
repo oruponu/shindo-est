@@ -14,7 +14,7 @@ from training import arv
 from training import bulletin
 from training import mesh
 
-_MINUS_SIGMA = chr(0x2212) + chr(0x03C3)
+_MINUS_SIGMA = chr(0xFF0D) + chr(0x03C3)
 _MEAN = chr(0x5E73) + chr(0x5747)
 _HEADER = f'"MeshCode","{_MINUS_SIGMA}","{_MEAN}","Longuitude","Laitude"'
 _JSHIS_COMMENTS = [
@@ -53,16 +53,18 @@ class ArvTest(unittest.TestCase):
             self.enterContext(tempfile.TemporaryDirectory())
         )
 
-    def _zip(self, name, entries):
+    def _zip(self, name, entries, encoding="utf-8"):
         path = self.root / name
         with zipfile.ZipFile(path, "w") as archive:
             for entry, text in entries.items():
-                archive.writestr(entry, text.encode("utf-8"))
+                archive.writestr(entry, text.encode(encoding))
         return path
 
     def _cabinet_office(self, lines):
         text = "\r\n".join([_HEADER, *lines]) + "\r\n"
-        return self._zip(arv.CABINET_OFFICE, {"to250mr3japan.csv": text})
+        return self._zip(
+            arv.CABINET_OFFICE, {"to250mr3japan.csv": text}, "cp932"
+        )
 
     def _jshis(self, lines, comments=None):
         comments = _JSHIS_COMMENTS if comments is None else comments
@@ -103,6 +105,14 @@ class ArvTest(unittest.TestCase):
         )
 
         self.assertEqual(table, {})
+
+    def test_cabinet_office_must_decode_as_cp932(self):
+        path = self.root / arv.CABINET_OFFICE
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("to250mr3japan.csv", b'"MeshCode","\x85\x40"\r\n')
+
+        with self.assertRaises(UnicodeDecodeError):
+            arv.read_cabinet_office(path, {_FIRST})
 
     def test_cabinet_office_rejects_repeated_meshes(self):
         path = self._cabinet_office([
