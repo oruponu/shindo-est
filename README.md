@@ -144,6 +144,10 @@ print(features.shape, slab_top.round(1))
 
 `features` does not validate its inputs. NaN inputs propagate to the features that depend on them, except that `path_frac` is 0 when any latitude, longitude, or depth is NaN. Convert the features to float32 before passing them to LightGBM, which rounds them to float32 when it compares them in its trees.
 
+## Training
+
+The `training` package builds training data from the JMA seismic intensity bulletin and compares LightGBM models that use the ARV derived from the Cabinet Office's seismic intensity increments, the ARV provided by J-SHIS, or no ARV as a baseline. It computes the features with the `shindo_est` module. Users obtain the source files themselves; they are not included in the repository. [training/README.md](training/README.md) describes the requirements, the sources and their terms, and the commands.
+
 ## License
 
 The code is licensed under the MIT License. Data sources and their terms are listed in [NOTICE](NOTICE).
