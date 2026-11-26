@@ -1,7 +1,8 @@
 # Copyright 2026 oruponu
 # SPDX-License-Identifier: MIT
-"""Tests the rows, splits, and features used to choose the ARV source."""
+"""Tests the rows, splits, and features for training and evaluation."""
 
+import dataclasses
 import datetime
 import unittest
 
@@ -26,6 +27,7 @@ _ENDS_AT_2017 = "7654335"
 _FAR = "7654328"
 _UNLISTED_PERIOD = "7654333"
 _NO_ARV = "7654334"
+_JSHIS_ONLY = "7654336"
 _TABLE = {
     _TRAINED: (1.2, 1.5),
     _HELD_OUT: (1.0, 0.9),
@@ -34,6 +36,7 @@ _TABLE = {
     _ENDS_AT_2017: (1.6, 1.7),
     _FAR: (2.0, 1.8),
     _UNLISTED_PERIOD: (0.8, 0.7),
+    _JSHIS_ONLY: (None, 1.2),
 }
 
 
@@ -85,6 +88,7 @@ def _dataset():
             ),
         ),
         _station(_UNLISTED_PERIOD, 5, period=None),
+        _station(_JSHIS_ONLY, 7),
         _station(_FAR, 300),
     ]
     quakes = [
@@ -113,6 +117,9 @@ class SelectionTest(unittest.TestCase):
             split.name: split
             for split in selection.splits(self.data, self.rows)
         }
+        self.both = selection.stations_with_arv(
+            self.data, _TABLE, selection.COMPARED_SOURCES
+        )
 
     def test_fixture(self):
         self.assertEqual(
@@ -162,6 +169,80 @@ class SelectionTest(unittest.TestCase):
         )
         self.assertTrue(np.any(self.number == _ONE_ARV))
         self.assertTrue(np.any(self.number == _NO_ARV))
+        self.assertTrue(np.any(self.number == _JSHIS_ONLY))
+
+    def test_usable_rows_need_the_cabinet_office_arv(self):
+        cabinet_office = selection.usable(
+            self.data, _TABLE, sources=("cabinet_office",)
+        )
+        compared = selection.usable(self.data, _TABLE)
+
+        for number, in_cabinet_office, in_compared in (
+            (_TRAINED, True, True),
+            (_ONE_ARV, True, False),
+            (_JSHIS_ONLY, False, False),
+            (_NO_ARV, False, False),
+        ):
+            with self.subTest(number=number):
+                chosen = self.number == number
+                self.assertTrue(np.any(chosen))
+                self.assertTrue(
+                    np.all(cabinet_office[chosen] == in_cabinet_office)
+                )
+                self.assertTrue(np.all(compared[chosen] == in_compared))
+        np.testing.assert_array_equal(
+            selection.rows(self.data, _TABLE, sources=("cabinet_office",)),
+            cabinet_office & (self.year >= 2004) & (self.year <= 2019),
+        )
+
+    def test_usable_rows_leave_out_suspicious_rows(self):
+        suspicious = self.data.suspicious
+        kept = selection.usable(self.data, _TABLE)
+        self.assertTrue(np.any(kept & suspicious))
+
+        usable = selection.usable(self.data, _TABLE, keep_suspicious=False)
+        rows = selection.rows(self.data, _TABLE, keep_suspicious=False)
+
+        np.testing.assert_array_equal(usable, kept & ~suspicious)
+        np.testing.assert_array_equal(rows, self.rows & ~suspicious)
+
+    def test_usable_rows_keep_the_suspicious_rows_of_deep_quakes(self):
+        quakes = np.unique(self.data.row_quake[self.data.suspicious])
+        self.assertGreaterEqual(len(quakes), 2)
+        depth = self.data.quake_depth.copy()
+        depth[quakes[0]] = selection.DEEP_QUAKE_DEPTH
+        depth[quakes[1]] = np.nextafter(selection.DEEP_QUAKE_DEPTH, 0.0)
+        data = dataclasses.replace(self.data, quake_depth=depth)
+        deep = data.row_quake == quakes[0]
+
+        usable = selection.usable(data, _TABLE, keep_suspicious=False)
+
+        np.testing.assert_array_equal(
+            usable,
+            selection.usable(data, _TABLE) & ~(data.suspicious & ~deep),
+        )
+
+    def test_deep_quakes_start_at_150_km(self):
+        self.assertEqual(selection.DEEP_QUAKE_DEPTH, 150.0)
+
+    def test_comparison_rows_keep_suspicious_rows(self):
+        self.assertTrue(np.any(self.rows & self.data.suspicious))
+
+    def test_usable_rows_include_quakes_after_2019(self):
+        usable = selection.usable(self.data, _TABLE)
+
+        self.assertTrue(np.any(usable[self.year == 2020]))
+        np.testing.assert_array_equal(
+            self.rows, usable & (self.year >= 2004) & (self.year <= 2019)
+        )
+
+    def test_unknown_sources_are_refused(self):
+        for sources in (("dmd",), ("cabinet_office", "none")):
+            with self.subTest(sources=sources):
+                with self.assertRaisesRegex(ValueError, "cabinet_office"):
+                    selection.stations_with_arv(self.data, _TABLE, sources)
+                with self.assertRaisesRegex(ValueError, "cabinet_office"):
+                    selection.usable(self.data, _TABLE, sources=sources)
 
     def test_training_rows_leave_out_the_held_out_stations(self):
         for split in self.splits.values():
@@ -204,7 +285,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_candidates_of_an_empty_split(self):
         quakes, stations = selection.candidates(
-            self.data, self.splits["region:izu"].test, _TABLE
+            self.data, self.splits["region:izu"].test, self.both
         )
 
         self.assertEqual((len(quakes), len(stations)), (0, 0))
@@ -215,10 +296,10 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(np.any(sampled_out))
 
         quakes, stations = selection.candidates(
-            self.data, self.splits["year"].test, _TABLE
+            self.data, self.splits["year"].test, self.both
         )
         kanto = selection.candidates(
-            self.data, self.splits["region:kanto"].test, _TABLE
+            self.data, self.splits["region:kanto"].test, self.both
         )
 
         pairs = [
@@ -253,6 +334,18 @@ class SelectionTest(unittest.TestCase):
                 _ENDS_AT_2017,
             ],
         )
+
+    def test_candidates_follow_the_eligible_stations(self):
+        eligible = self.both.copy()
+        eligible[self.data.station_number == _FAR] = False
+
+        quakes, stations = selection.candidates(
+            self.data, self.splits["year"].test, eligible
+        )
+
+        numbers = {str(self.data.station_number[s]) for s in stations}
+        self.assertEqual(numbers, {_TRAINED, _HELD_OUT})
+        self.assertEqual(len(quakes), 4)
 
 
 class FeatureMatrixTest(unittest.TestCase):

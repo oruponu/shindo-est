@@ -203,7 +203,13 @@ class RunTest(_Directory):
         table = _table()
         split = selection.splits(self.data, selection.rows(self.data, table))[0]
         rows = np.flatnonzero(split.test)
-        quakes, stations = selection.candidates(self.data, split.test, table)
+        quakes, stations = selection.candidates(
+            self.data,
+            split.test,
+            selection.stations_with_arv(
+                self.data, table, selection.COMPARED_SOURCES
+            ),
+        )
         self.assertGreater(min(len(rows), len(quakes)), 2 * batch)
         model = hurdle.Hurdle(
             *(

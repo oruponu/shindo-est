@@ -175,7 +175,13 @@ class _Trainer:
         test_probability, test_regression = self._predict(
             model, data.row_quake[test], data.row_station[test], case
         )
-        quakes, stations = selection.candidates(data, split.test, self.table)
+        quakes, stations = selection.candidates(
+            data,
+            split.test,
+            selection.stations_with_arv(
+                data, self.table, selection.COMPARED_SOURCES
+            ),
+        )
         candidate_probability, candidate_regression = self._predict(
             model, quakes, stations, case
         )
@@ -355,7 +361,13 @@ def report(
         }
         if not directories:
             continue
-        candidates = selection.candidates(data, split.test, table)
+        candidates = selection.candidates(
+            data,
+            split.test,
+            selection.stations_with_arv(
+                data, table, selection.COMPARED_SOURCES
+            ),
+        )
         predictions = {
             case: _load(directory, digests, split, candidates)
             for case, directory in directories.items()

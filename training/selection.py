@@ -1,16 +1,19 @@
 # Copyright 2026 oruponu
 # SPDX-License-Identifier: MIT
-"""Chooses the rows, splits, and features for comparing the ARV sources.
+"""Chooses the rows, splits, and features for training and evaluation.
 
 Every row given to training or evaluation while choosing passes rows(): a
 quake from FIRST_YEAR to LAST_YEAR, so the later quakes stay unseen for the
-final report, and a station with an ARV from both sources, so that every
-case learns and is measured on the same rows. Training never uses a
-held-out station; the tests use every station, so that held-out stations
-can be measured apart.
+final report, and a station with an ARV from the given sources. The ARV
+comparison asks for both sources, so that every case learns and is measured
+on the same rows; later choices ask for the chosen source only, and may
+leave out the suspicious unfelt rows of shallow quakes. Training never
+uses a held-out station; the tests use every station, so that held-out
+stations can be measured apart.
 """
 
 from collections.abc import Mapping
+from collections.abc import Sequence
 import dataclasses
 import math
 
@@ -25,7 +28,12 @@ FIRST_YEAR = 2004
 LAST_YEAR = 2019
 TRAINING_YEARS = (FIRST_YEAR, 2016)
 TEST_YEARS = (2017, LAST_YEAR)
+# The depth in kilometers from which a quake keeps its suspicious unfelt
+# rows: a deep quake can leave a station unshaken next to one that
+# recorded 2.5, so its rows are kept as likely real.
+DEEP_QUAKE_DEPTH = 150.0
 CASES = ("cabinet_office", "jshis", "none")
+COMPARED_SOURCES = ("cabinet_office", "jshis")
 
 # The column of the ARV table that each case takes.
 _SOURCES = {"cabinet_office": 0, "jshis": 1, "none": 0}
@@ -49,31 +57,106 @@ class Split:
     test: npt.NDArray[np.bool_]
 
 
-def rows(data: dataset.Dataset, table: ArvTable) -> npt.NDArray[np.bool_]:
-    """Returns the rows that may be used while choosing.
+def stations_with_arv(
+    data: dataset.Dataset, table: ArvTable, sources: Sequence[str]
+) -> npt.NDArray[np.bool_]:
+    """Returns whether each station has an ARV from every given source.
 
     Args:
         data: The dataset.
         table: The ARVs from the Cabinet Office and from J-SHIS of each
             station number, None where a source has none.
+        sources: Some of COMPARED_SOURCES.
 
-    Returns:
-        Whether each row has a quake from FIRST_YEAR to LAST_YEAR and a
-        station with an ARV from both sources.
+    Raises:
+        ValueError: A source is not one of COMPARED_SOURCES.
     """
-    year = data.quake_year[data.row_quake]
-    both = _both_arv(data, table)[data.row_station]
-    return _between(year, (FIRST_YEAR, LAST_YEAR)) & both
+    unknown = [name for name in sources if name not in COMPARED_SOURCES]
+    if unknown:
+        raise ValueError(
+            f"unknown sources {unknown}; known: {COMPARED_SOURCES}"
+        )
+    columns = [_SOURCES[name] for name in sources]
+    return np.array(
+        [
+            all(
+                table.get(str(number), (None, None))[column] is not None
+                for column in columns
+            )
+            for number in data.station_number
+        ],
+        dtype=np.bool_,
+    )
 
 
-def splits(
-    data: dataset.Dataset, usable: npt.NDArray[np.bool_]
-) -> list[Split]:
-    """Divides the usable rows by year and by region.
+def usable(
+    data: dataset.Dataset,
+    table: ArvTable,
+    *,
+    sources: Sequence[str] = COMPARED_SOURCES,
+    keep_suspicious: bool = True,
+) -> npt.NDArray[np.bool_]:
+    """Returns the rows of any year that training or evaluation may use.
 
     Args:
         data: The dataset.
-        usable: The rows from rows().
+        table: The ARV table given to stations_with_arv().
+        sources: The sources each station needs an ARV from.
+        keep_suspicious: Whether to keep the suspicious unfelt rows of
+            quakes shallower than DEEP_QUAKE_DEPTH.
+
+    Returns:
+        Whether each row has a station with an ARV from every source and,
+        unless keep_suspicious, is not a suspicious row of a quake
+        shallower than DEEP_QUAKE_DEPTH.
+
+    Raises:
+        ValueError: A source is not one of COMPARED_SOURCES.
+    """
+    chosen = stations_with_arv(data, table, sources)[data.row_station]
+    if keep_suspicious:
+        return chosen
+    shallow = data.quake_depth[data.row_quake] < DEEP_QUAKE_DEPTH
+    kept: npt.NDArray[np.bool_] = chosen & ~(data.suspicious & shallow)
+    return kept
+
+
+def rows(
+    data: dataset.Dataset,
+    table: ArvTable,
+    *,
+    sources: Sequence[str] = COMPARED_SOURCES,
+    keep_suspicious: bool = True,
+) -> npt.NDArray[np.bool_]:
+    """Returns the rows that may be used while choosing.
+
+    Args:
+        data: The dataset.
+        table: The ARV table given to stations_with_arv().
+        sources: The sources each station needs an ARV from.
+        keep_suspicious: The keep_suspicious given to usable().
+
+    Returns:
+        The rows of usable() with a quake from FIRST_YEAR to LAST_YEAR.
+
+    Raises:
+        ValueError: A source is not one of COMPARED_SOURCES.
+    """
+    year = data.quake_year[data.row_quake]
+    chosen = usable(
+        data, table, sources=sources, keep_suspicious=keep_suspicious
+    )
+    return _between(year, (FIRST_YEAR, LAST_YEAR)) & chosen
+
+
+def splits(
+    data: dataset.Dataset, allowed: npt.NDArray[np.bool_]
+) -> list[Split]:
+    """Divides the allowed rows by year and by region.
+
+    Args:
+        data: The dataset.
+        allowed: The rows from rows().
 
     Returns:
         The year split, trained on TRAINING_YEARS and measured on
@@ -82,12 +165,12 @@ def splits(
         on a held-out station.
     """
     year = data.quake_year[data.row_quake]
-    trainable = usable & ~data.station_held_out[data.row_station]
+    trainable = allowed & ~data.station_held_out[data.row_station]
     result = [
         Split(
             name="year",
             train=trainable & _between(year, TRAINING_YEARS),
-            test=usable & _between(year, TEST_YEARS),
+            test=allowed & _between(year, TEST_YEARS),
         )
     ]
     for name in dataset.REGIONS:
@@ -96,14 +179,16 @@ def splits(
             Split(
                 name=f"region:{name}",
                 train=trainable & ~inside,
-                test=usable & inside,
+                test=allowed & inside,
             )
         )
     return result
 
 
 def candidates(
-    data: dataset.Dataset, test: npt.NDArray[np.bool_], table: ArvTable
+    data: dataset.Dataset,
+    test: npt.NDArray[np.bool_],
+    eligible: npt.NDArray[np.bool_],
 ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]]:
     """Returns every station that could have recorded the test quakes.
 
@@ -113,15 +198,14 @@ def candidates(
     Args:
         data: The dataset.
         test: The test rows of a split.
-        table: The ARV table given to rows().
+        eligible: Whether each station may be a candidate.
 
     Returns:
         A tuple (quakes, stations) of the quake and the station of each
         candidate, in the order of the quakes and then of the stations: for
-        each quake of the test rows, the stations with an ARV from both
-        sources that were in operation at its origin time or recorded it.
+        each quake of the test rows, the eligible stations that were in
+        operation at its origin time or recorded it.
     """
-    both = _both_arv(data, table)
     quakes: list[npt.NDArray[np.int32]] = []
     stations: list[npt.NDArray[np.int32]] = []
     for quake in np.unique(data.row_quake[test]):
@@ -132,7 +216,7 @@ def candidates(
         start, stop = np.searchsorted(data.row_quake, [quake, quake + 1])
         recorded = data.row_station[start:stop][data.felt[start:stop]]
         chosen[recorded] = True
-        found = np.flatnonzero(chosen & both).astype(np.int32)
+        found = np.flatnonzero(chosen & eligible).astype(np.int32)
         quakes.append(np.full(len(found), quake, dtype=np.int32))
         stations.append(found)
     return _join(quakes), _join(stations)
@@ -154,7 +238,7 @@ def feature_matrix(
         data: The dataset.
         quakes: The quake of each pair.
         stations: The station of each pair.
-        table: The ARV table given to rows().
+        table: The ARV table given to stations_with_arv().
         case: One of CASES. cabinet_office and jshis take the ARV of that
             source; none takes the Cabinet Office's and drops log_arv.
         slabs: The slab geometry.
@@ -201,19 +285,6 @@ def feature_matrix(
         name for name in features.FEATURE_NAMES if name != _ARV_FEATURE
     )
     return np.delete(values, column, axis=1), names
-
-
-def _both_arv(
-    data: dataset.Dataset, table: ArvTable
-) -> npt.NDArray[np.bool_]:
-    """Returns whether each station has an ARV from both sources."""
-    return np.array(
-        [
-            None not in table.get(str(number), (None, None))
-            for number in data.station_number
-        ],
-        dtype=np.bool_,
-    )
 
 
 def _between(
