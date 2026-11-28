@@ -176,10 +176,12 @@ class RunTest(_Directory):
                     [sources.file_sha256(path) for path in features.SLAB_GRIDS],
                 )
                 self.assertEqual(
-                    (inputs["case"], inputs["split"], inputs["max_rounds"]),
-                    (case, "year", _ROUNDS),
+                    (inputs["case"], inputs["split"]), (case, "year")
                 )
-                self.assertEqual(inputs["parameters"], dict(hurdle.PARAMETERS))
+                self.assertEqual(
+                    inputs["parameters"],
+                    hurdle.Settings(max_rounds=_ROUNDS).parameters(),
+                )
                 self.assertRegex(inputs["head"], "^[0-9a-f]{40}$")
                 self.assertIsInstance(inputs["dirty"], bool)
                 split = selection.splits(

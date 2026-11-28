@@ -8,6 +8,7 @@ from unittest import mock
 import lightgbm
 import numpy as np
 
+from training import evaluate
 from training import features
 from training import hurdle
 
@@ -36,8 +37,34 @@ def _synthetic(rows=5000, quakes=50, columns=14):
     }
 
 
-def _fit(rows, names=features.FEATURE_NAMES, max_rounds=_ROUNDS):
-    return hurdle.fit(feature_names=names, max_rounds=max_rounds, **rows)
+def _fit(rows, names=features.FEATURE_NAMES, **settings):
+    return hurdle.fit(
+        feature_names=names,
+        settings=hurdle.Settings(**{"max_rounds": _ROUNDS, **settings}),
+        **rows,
+    )
+
+
+def _largest_leaf(booster):
+    """Returns the largest leaf magnitude of the trees after the first.
+
+    The first tree is skipped because it also holds the initial score.
+    """
+    trees = booster.dump_model()["tree_info"][1:]
+    return max(
+        abs(value)
+        for tree in trees
+        for value in _leaf_values(tree["tree_structure"])
+    )
+
+
+def _leaf_values(node):
+    """Yields the leaf values under a node of dump_model()."""
+    if "leaf_value" in node:
+        yield node["leaf_value"]
+        return
+    for child in ("left_child", "right_child"):
+        yield from _leaf_values(node[child])
 
 
 class ValidationTest(unittest.TestCase):
@@ -164,6 +191,54 @@ class FitTest(unittest.TestCase):
             [len(values) for values in model.predict(sample[:0])], [0, 0]
         )
 
+    def test_max_delta_step_bounds_the_classifier(self):
+        rows = _synthetic()
+        bound = 0.05 * 1.0 + 1e-12
+
+        free = _fit(rows)
+        capped = _fit(rows, max_delta_step=1.0)
+
+        self.assertGreater(_largest_leaf(free.classifier), bound)
+        self.assertLessEqual(_largest_leaf(capped.classifier), bound)
+        self.assertEqual(capped.classifier.params["max_delta_step"], 1.0)
+        self.assertNotIn("max_delta_step", capped.regressor.params)
+
+    def test_weighted_regression_changes_only_the_regressor(self):
+        rows = _synthetic()
+        validation = hurdle.validation_quakes(rows["row_quake"])
+        known = ~np.isnan(rows["observed"])
+        plain = _fit(rows)
+
+        with mock.patch.object(
+            lightgbm, "train", wraps=lightgbm.train
+        ) as train:
+            weighted = _fit(rows, weighted_regression=True)
+
+        self.assertEqual(
+            plain.classifier.model_to_string(),
+            weighted.classifier.model_to_string(),
+        )
+        self.assertNotEqual(
+            plain.regressor.model_to_string(),
+            weighted.regressor.model_to_string(),
+        )
+        regressor = train.call_args_list[1].kwargs
+        for dataset, chosen in (
+            (regressor["train_set"], known & ~validation),
+            (regressor["valid_sets"][0], known & validation),
+        ):
+            np.testing.assert_array_equal(
+                dataset.get_weight(),
+                hurdle.class_weight(rows["observed"][chosen]),
+            )
+
+    def test_settings_reach_lightgbm(self):
+        model = _fit(_synthetic(), learning_rate=0.1, max_rounds=7)
+
+        for booster in (model.classifier, model.regressor):
+            self.assertEqual(booster.params["learning_rate"], 0.1)
+            self.assertLessEqual(booster.num_trees(), 7)
+
     def test_fit_needs_rows_on_both_sides(self):
         rows = _synthetic()
         validation = hurdle.validation_quakes(rows["row_quake"])
@@ -190,7 +265,6 @@ class FitTest(unittest.TestCase):
         self.assertEqual(
             dict(hurdle.PARAMETERS),
             {
-                "learning_rate": 0.05,
                 "num_leaves": 63,
                 "min_data_in_leaf": 200,
                 "feature_fraction": 0.9,
@@ -211,6 +285,101 @@ class FitTest(unittest.TestCase):
                 hurdle.VALIDATION_FRACTION,
             ),
             (3000, 100, 0.1),
+        )
+
+
+class ClassWeightTest(unittest.TestCase):
+
+    def test_class_weight(self):
+        observed = np.array([0.5, 1.4, 1.5, 4.5, 5.0, 6.6, 0.4], np.float32)
+
+        weight = hurdle.class_weight(observed)
+
+        np.testing.assert_array_equal(weight, [2, 2, 3, 6, 7, 10, 1])
+        self.assertEqual(weight.dtype, np.float64)
+        with self.assertRaisesRegex(ValueError, "NaN"):
+            hurdle.class_weight(np.array([1.0, np.nan], np.float32))
+
+    def test_class_weight_at_every_edge(self):
+        edges = np.array(evaluate.CLASS_EDGES, np.float32)
+        below = np.nextafter(edges, np.float32(0))
+
+        np.testing.assert_array_equal(
+            hurdle.class_weight(edges), np.arange(2, 11)
+        )
+        np.testing.assert_array_equal(
+            hurdle.class_weight(below), np.arange(1, 10)
+        )
+
+
+class RefitTest(unittest.TestCase):
+
+    def test_refit_trains_the_given_rounds(self):
+        rows = _synthetic()
+        known = ~np.isnan(rows["observed"])
+        refit_rows = {
+            name: rows[name]
+            for name in ("features", "felt", "observed", "weight")
+        }
+
+        with mock.patch.object(
+            lightgbm, "train", wraps=lightgbm.train
+        ) as train:
+            model = hurdle.refit(
+                feature_names=features.FEATURE_NAMES,
+                settings=hurdle.Settings(weighted_regression=True),
+                rounds=hurdle.Rounds(classifier=13, regressor=11),
+                **refit_rows,
+            )
+
+        self.assertEqual(model.classifier.num_trees(), 13)
+        self.assertEqual(model.regressor.num_trees(), 11)
+        classifier, regressor = train.call_args_list
+        for call, rounds in ((classifier, 13), (regressor, 11)):
+            self.assertEqual(call.kwargs["num_boost_round"], rounds)
+            self.assertNotIn("valid_sets", call.kwargs)
+            self.assertNotIn("callbacks", call.kwargs)
+        self.assertEqual(
+            classifier.kwargs["train_set"].num_data(), len(rows["felt"])
+        )
+        np.testing.assert_array_equal(
+            classifier.kwargs["train_set"].get_weight(), rows["weight"]
+        )
+        regression_set = regressor.kwargs["train_set"]
+        np.testing.assert_array_equal(
+            regression_set.get_label(), rows["observed"][known]
+        )
+        np.testing.assert_array_equal(
+            regression_set.get_weight(),
+            hurdle.class_weight(rows["observed"][known]),
+        )
+
+    def test_refit_rounds(self):
+        for best, expected in (
+            ((2999, 2308), hurdle.Rounds(3299, 2539)),
+            ((1, 1), hurdle.Rounds(1, 1)),
+        ):
+            with self.subTest(best=best):
+                model = hurdle.Hurdle(
+                    classifier=mock.Mock(best_iteration=best[0]),
+                    regressor=mock.Mock(best_iteration=best[1]),
+                )
+
+                self.assertEqual(hurdle.refit_rounds(model), expected)
+
+
+class SettingsTest(unittest.TestCase):
+
+    def test_parameters_record_the_settings(self):
+        self.assertEqual(
+            hurdle.Settings().parameters(),
+            {
+                **hurdle.PARAMETERS,
+                "learning_rate": 0.05,
+                "max_rounds": 3000,
+                "max_delta_step": 0.0,
+                "weighted_regression": False,
+            },
         )
 
 

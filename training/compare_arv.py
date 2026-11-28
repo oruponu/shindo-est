@@ -127,14 +127,14 @@ class _Trainer:
         table: The ARV table.
         slabs: The slab geometry.
         threads: The number of threads computing features.
-        max_rounds: The most boosting rounds of each model.
+        settings: The training settings.
     """
 
     data: dataset.Dataset
     table: selection.ArvTable
     slabs: shindo_est.SlabGeometry
     threads: int
-    max_rounds: int
+    settings: hurdle.Settings
 
     def train(
         self,
@@ -167,7 +167,7 @@ class _Trainer:
             data.felt[train],
             data.observed[train],
             data.weight[train],
-            max_rounds=self.max_rounds,
+            settings=self.settings,
         )
         # Frees the largest array before the predictions take memory.
         del values
@@ -290,7 +290,8 @@ def run(
     splits = selection.splits(data, selection.rows(data, table))
     if split_names is not None:
         splits = _choose(splits, split_names)
-    trainer = _Trainer(data, table, features.read_slabs(), threads, max_rounds)
+    settings = hurdle.Settings(max_rounds=max_rounds)
+    trainer = _Trainer(data, table, features.read_slabs(), threads, settings)
     head, dirty = _revision()
     common = {
         "dataset": sources.file_sha256(dataset_path),
@@ -299,8 +300,7 @@ def run(
         "shindo_est": shindo_est.__version__,
         "head": head,
         "dirty": dirty,
-        "parameters": dict(hurdle.PARAMETERS),
-        "max_rounds": max_rounds,
+        "parameters": settings.parameters(),
     }
     for case in cases:
         for split in splits:
