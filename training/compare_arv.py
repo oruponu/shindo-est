@@ -23,41 +23,31 @@ Usage:
 
 import argparse
 from collections.abc import Mapping, Sequence
-import dataclasses
 import json
 import logging
 import pathlib
 import subprocess
 import sys
-import time
-from typing import Any, Self
+from typing import Any
 
-import lightgbm
 import numpy as np
 import numpy.typing as npt
 
 import shindo_est
 from training import arv
 from training import dataset
-from training import evaluate
 from training import features
 from training import hurdle
+from training import runs
 from training import selection
 from training import sources
 
 DEFAULT_OUT = features.REPOSITORY / "training" / "data" / "compare-arv"
-FILES = (
-    "classifier.txt",
-    "regressor.txt",
-    "predictions.npz",
-    "training.json",
-)
-GROUPS = ("trained", "held_out", "all")
+FILES = runs.FILES
+GROUPS = runs.GROUPS
 RESULTS_JSON = "results.json"
 RESULTS_MARKDOWN = "results.md"
 
-_RECORD = "training.json"
-_PREDICTIONS = "predictions.npz"
 # The measures in the Markdown table of a split, and where each one is.
 _COLUMNS = (
     ("summary", "felt_rows"),
@@ -69,184 +59,10 @@ _COLUMNS = (
     ("max", "max_bias"),
     ("max", "max_rmse"),
 )
-_INTERVAL = ("difference", "low", "high")
-# The pairs predicted at a time, which bounds the memory of their features.
-_PREDICTION_BATCH = 1 << 20
 
 _logger = logging.getLogger(__name__)
 
 type _Json = dict[str, Any]
-
-
-@dataclasses.dataclass(frozen=True)
-class _Predictions:
-    """The predictions of one case on one split.
-
-    Attributes:
-        test_rows: The index of each test row in the dataset.
-        test_probability: The felt probability of each test row.
-        test_regression: The regression value of each test row.
-        candidate_quake: The quake of each candidate.
-        candidate_station: The station of each candidate.
-        candidate_probability: The felt probability of each candidate.
-        candidate_regression: The regression value of each candidate.
-    """
-
-    test_rows: npt.NDArray[np.intp]
-    test_probability: npt.NDArray[np.float64]
-    test_regression: npt.NDArray[np.float64]
-    candidate_quake: npt.NDArray[np.int32]
-    candidate_station: npt.NDArray[np.int32]
-    candidate_probability: npt.NDArray[np.float64]
-    candidate_regression: npt.NDArray[np.float64]
-
-    def save(self, path: pathlib.Path) -> None:
-        """Writes the arrays to an .npz file."""
-        np.savez(
-            path,
-            **{
-                field.name: getattr(self, field.name)
-                for field in dataclasses.fields(self)
-            },
-        )
-
-    @classmethod
-    def load(cls, path: pathlib.Path) -> Self:
-        """Reads the arrays written by save."""
-        names = [field.name for field in dataclasses.fields(cls)]
-        with np.load(path, allow_pickle=False) as arrays:
-            return cls(**{name: arrays[name] for name in names})
-
-
-@dataclasses.dataclass(frozen=True)
-class _Trainer:
-    """Trains and predicts the cases on the splits of one dataset.
-
-    Attributes:
-        data: The dataset.
-        table: The ARV table.
-        slabs: The slab geometry.
-        threads: The number of threads computing features.
-        settings: The training settings.
-    """
-
-    data: dataset.Dataset
-    table: selection.ArvTable
-    slabs: shindo_est.SlabGeometry
-    threads: int
-    settings: hurdle.Settings
-
-    def train(
-        self,
-        case: str,
-        split: selection.Split,
-        directory: pathlib.Path,
-        inputs: Mapping[str, object],
-    ) -> None:
-        """Trains one case on one split and writes FILES, the record last.
-
-        Args:
-            case: One of selection.CASES.
-            split: The split to train and predict.
-            directory: The directory to write FILES to.
-            inputs: What the files are made from, written to the record for
-                _complete to compare.
-        """
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / _RECORD).unlink(missing_ok=True)
-        started = time.monotonic()
-        data = self.data
-        train = np.flatnonzero(split.train)
-        values, names = self._features(
-            data.row_quake[train], data.row_station[train], case
-        )
-        model = hurdle.fit(
-            values,
-            names,
-            data.row_quake[train],
-            data.felt[train],
-            data.observed[train],
-            data.weight[train],
-            settings=self.settings,
-        )
-        # Frees the largest array before the predictions take memory.
-        del values
-        test = np.flatnonzero(split.test)
-        test_probability, test_regression = self._predict(
-            model, data.row_quake[test], data.row_station[test], case
-        )
-        quakes, stations = selection.candidates(
-            data,
-            split.test,
-            selection.stations_with_arv(
-                data, self.table, selection.COMPARED_SOURCES
-            ),
-        )
-        candidate_probability, candidate_regression = self._predict(
-            model, quakes, stations, case
-        )
-        model.classifier.save_model(directory / "classifier.txt")
-        model.regressor.save_model(directory / "regressor.txt")
-        _Predictions(
-            test_rows=test,
-            test_probability=test_probability,
-            test_regression=test_regression,
-            candidate_quake=quakes,
-            candidate_station=stations,
-            candidate_probability=candidate_probability,
-            candidate_regression=candidate_regression,
-        ).save(directory / _PREDICTIONS)
-        seconds = round(time.monotonic() - started, 1)
-        record = {
-            "train_rows": len(train),
-            "test_rows": len(test),
-            "candidates": len(quakes),
-            "trees": {
-                "classifier": model.classifier.num_trees(),
-                "regressor": model.regressor.num_trees(),
-            },
-            "seconds": seconds,
-            "gain": {
-                "classifier": _gain(model.classifier),
-                "regressor": _gain(model.regressor),
-            },
-            "inputs": inputs,
-        }
-        (directory / _RECORD).write_text(
-            json.dumps(record, indent=2) + "\n", encoding="ascii"
-        )
-        _logger.info("%s/%s: trained in %.1f s", case, split.name, seconds)
-
-    def _features(
-        self,
-        quakes: npt.NDArray[np.int32],
-        stations: npt.NDArray[np.int32],
-        case: str,
-    ) -> tuple[npt.NDArray[np.float32], tuple[str, ...]]:
-        return selection.feature_matrix(
-            self.data,
-            quakes,
-            stations,
-            self.table,
-            case,
-            self.slabs,
-            threads=self.threads,
-        )
-
-    def _predict(
-        self,
-        model: hurdle.Hurdle,
-        quakes: npt.NDArray[np.int32],
-        stations: npt.NDArray[np.int32],
-        case: str,
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        probability = np.empty(len(quakes))
-        regression = np.empty(len(quakes))
-        for start in range(0, len(quakes), _PREDICTION_BATCH):
-            batch = slice(start, start + _PREDICTION_BATCH)
-            values, _ = self._features(quakes[batch], stations[batch], case)
-            probability[batch], regression[batch] = model.predict(values)
-        return probability, regression
 
 
 def run(
@@ -291,8 +107,14 @@ def run(
     if split_names is not None:
         splits = _choose(splits, split_names)
     settings = hurdle.Settings(max_rounds=max_rounds)
-    trainer = _Trainer(data, table, features.read_slabs(), threads, settings)
-    head, dirty = _revision()
+    trainer = runs.Trainer(
+        data,
+        table,
+        features.read_slabs(),
+        threads,
+        selection.stations_with_arv(data, table, selection.COMPARED_SOURCES),
+    )
+    head, dirty = runs.revision()
     common = {
         "dataset": sources.file_sha256(dataset_path),
         "arv": sources.file_sha256(arv_path),
@@ -306,10 +128,10 @@ def run(
         for split in splits:
             directory = out_directory / case / split.name
             inputs = {**common, "case": case, "split": split.name}
-            if not dirty and _complete(directory, inputs):
+            if not dirty and runs.complete(directory, inputs):
                 _logger.info("%s/%s: trained already", case, split.name)
                 continue
-            trainer.train(case, split, directory, inputs)
+            trainer.train(case, split, settings, directory, inputs)
 
 
 def report(
@@ -347,17 +169,13 @@ def report(
         "dataset": sources.file_sha256(dataset_path),
         "arv": sources.file_sha256(arv_path),
     }
-    groups = {
-        "trained": ~data.station_held_out,
-        "held_out": data.station_held_out,
-        "all": np.ones_like(data.station_held_out),
-    }
+    groups = runs.groups(data)
     results: _Json = {}
     for split in selection.splits(data, selection.rows(data, table)):
         directories = {
             case: out_directory / case / split.name
             for case in selection.CASES
-            if (out_directory / case / split.name / _RECORD).exists()
+            if (out_directory / case / split.name / runs.RECORD).exists()
         }
         if not directories:
             continue
@@ -369,7 +187,7 @@ def report(
             ),
         )
         predictions = {
-            case: _load(directory, digests, split, candidates)
+            case: runs.load(directory, digests, split, candidates)
             for case, directory in directories.items()
         }
         results[split.name] = _compare(data, predictions, groups)
@@ -443,76 +261,9 @@ def _choose(
     return [split for split in splits if split.name in names]
 
 
-def _revision() -> tuple[str, bool]:
-    """Returns the commit of the repository and whether it has changes."""
-    head = _git("rev-parse", "HEAD").strip()
-    return head, bool(_git("status", "--porcelain").strip())
-
-
-def _git(*arguments: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(features.REPOSITORY), *arguments],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-
-def _complete(directory: pathlib.Path, inputs: Mapping[str, object]) -> bool:
-    """Returns whether a case and split was trained from the same inputs.
-
-    A record that cannot be read, as after a stop while writing it, counts
-    as not trained.
-    """
-    if not all((directory / name).exists() for name in FILES):
-        return False
-    try:
-        record = json.loads((directory / _RECORD).read_text(encoding="ascii"))
-    except ValueError:
-        return False
-    return isinstance(record, dict) and record.get("inputs") == inputs
-
-
-def _gain(booster: lightgbm.Booster) -> dict[str, float | None]:
-    """Returns each feature's share of the total gain, None without any."""
-    gains = booster.feature_importance(importance_type="gain")
-    total = float(gains.sum())
-    return {
-        name: None if total == 0 else float(gain) / total
-        for name, gain in zip(booster.feature_name(), gains)
-    }
-
-
-def _load(
-    directory: pathlib.Path,
-    digests: Mapping[str, str],
-    split: selection.Split,
-    candidates: tuple[npt.NDArray[np.int32], npt.NDArray[np.int32]],
-) -> _Predictions:
-    """Reads the predictions of a case on a split and checks what they are of.
-
-    Raises:
-        ValueError: The record names another dataset or ARV table, or the
-            predictions are not of the test rows and the candidates.
-    """
-    record = json.loads((directory / _RECORD).read_text(encoding="ascii"))
-    for name, digest in digests.items():
-        if record["inputs"][name] != digest:
-            raise ValueError(f"{directory}: trained on another {name}")
-    predicted = _Predictions.load(directory / _PREDICTIONS)
-    for name, actual, expected in (
-        ("test rows", predicted.test_rows, np.flatnonzero(split.test)),
-        ("candidate quakes", predicted.candidate_quake, candidates[0]),
-        ("candidate stations", predicted.candidate_station, candidates[1]),
-    ):
-        if not np.array_equal(actual, expected):
-            raise ValueError(f"{directory}: the {name} are not of the split")
-    return predicted
-
-
 def _compare(
     data: dataset.Dataset,
-    predictions: Mapping[str, _Predictions],
+    predictions: Mapping[str, runs.Predictions],
     groups: Mapping[str, npt.NDArray[np.bool_]],
 ) -> _Json:
     """Measures the cases of one split on each group and compares them."""
@@ -522,75 +273,15 @@ def _compare(
     for group, chosen in groups.items():
         errors = {}
         for case, predicted in predictions.items():
-            cases[case][group], errors[case] = _measure(data, predicted, chosen)
+            cases[case][group], errors[case] = runs.measure(
+                data, predicted, chosen
+            )
         differences[group] = {
-            f"{case} - {first}": _difference(errors[case], errors[first])
+            f"{case} - {first}": runs.difference(errors[case], errors[first])
             for case in predictions
             if case != first and first in predictions
         }
     return {"cases": cases, "differences": differences}
-
-
-def _measure(
-    data: dataset.Dataset,
-    predicted: _Predictions,
-    chosen: npt.NDArray[np.bool_],
-) -> tuple[_Json, tuple[npt.NDArray[np.int32], npt.NDArray[np.float64]]]:
-    """Measures one case on the stations of one group.
-
-    Returns:
-        A tuple (measured, errors) of the summary, maxima, and calibration,
-        and of the quake and the displayed minus observed intensity of each
-        felt row with an instrumental intensity.
-    """
-    inside = chosen[data.row_station[predicted.test_rows]]
-    rows = predicted.test_rows[inside]
-    probability = predicted.test_probability[inside]
-    regression = predicted.test_regression[inside]
-    row_quake = data.row_quake[rows]
-    felt = data.felt[rows]
-    observed = data.observed[rows]
-    weight = data.weight[rows]
-    candidate = chosen[predicted.candidate_station]
-    candidate_display = evaluate.display(
-        predicted.candidate_probability[candidate],
-        predicted.candidate_regression[candidate],
-        evaluate.PREVIOUS,
-    )
-    measured = {
-        "summary": evaluate.summarize(
-            row_quake, felt, observed, weight, probability, regression
-        ),
-        "max": evaluate.max_per_quake(
-            predicted.candidate_quake[candidate],
-            candidate_display,
-            row_quake,
-            observed,
-        ),
-        "calibration": [
-            dataclasses.asdict(calibration_bin)
-            for calibration_bin in evaluate.calibration(
-                felt, weight, probability
-            )
-        ],
-    }
-    known = felt & ~np.isnan(observed)
-    shown = evaluate.display(probability, regression, evaluate.PREVIOUS)
-    return measured, (row_quake[known], shown[known] - observed[known])
-
-
-def _difference(
-    errors: tuple[npt.NDArray[np.int32], npt.NDArray[np.float64]],
-    first_errors: tuple[npt.NDArray[np.int32], npt.NDArray[np.float64]],
-) -> dict[str, float] | None:
-    """Returns the RMSE difference and its interval, None without rows."""
-    row_quake, error = errors
-    if row_quake.size == 0:
-        return None
-    difference, low, high = evaluate.bootstrap_rmse_difference(
-        row_quake, error, first_errors[1]
-    )
-    return dict(zip(_INTERVAL, (difference, low, high)))
 
 
 def _markdown(results: _Json) -> str:
@@ -620,7 +311,7 @@ def _markdown(results: _Json) -> str:
             for name, difference in compared["differences"][group].items():
                 values = [
                     None if difference is None else difference[key]
-                    for key in _INTERVAL
+                    for key in runs.INTERVAL
                 ]
                 cells = " | ".join(_cell(value) for value in values)
                 lines.append(f"| {name} | {group} | {cells} |")

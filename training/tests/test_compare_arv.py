@@ -4,10 +4,8 @@
 
 import contextlib
 import dataclasses
-import datetime
 import io
 import json
-import math
 import pathlib
 import tempfile
 import unittest
@@ -17,86 +15,17 @@ import lightgbm
 import numpy as np
 
 from training import arv
-from training import bulletin
 from training import compare_arv
-from training import dataset
 from training import evaluate
 from training import features
 from training import hurdle
+from training import runs
 from training import selection
 from training import sources
+from training.tests import synthetic
 
 _ROUNDS = 20
-_NUMBERS = tuple(str(number) for number in range(7654321, 7654340))
-_ONE_ARV = "7654323"
 _TWO_CASES = ("cabinet_office", "jshis")
-
-
-def _dataset():
-    """Returns quakes from 2004 to 2020 recorded on a grid of stations.
-
-    The stations stand 20 minutes of arc apart, five to a row, so that the
-    small quakes leave far stations unfelt and some of those are sampled
-    out.
-    """
-    period = bulletin.Period(datetime.datetime(1990, 1, 1), None)
-    stations = [
-        bulletin.Station(
-            number=number,
-            name="Test",
-            latitude_minutes=35 * 60 + 20 * (at // 5),
-            longitude_minutes=139 * 60 + 20 * (at % 5),
-            period=period,
-        )
-        for at, number in enumerate(_NUMBERS)
-    ]
-    rng = np.random.default_rng(3)
-    quakes = []
-    for year in range(2004, 2021):
-        for month in range(1, 13):
-            latitude = 35 + rng.uniform(0, 1.2)
-            longitude = 139 + rng.uniform(0, 1.4)
-            magnitude = round(rng.uniform(3.5, 6.5), 1)
-            records = []
-            for station in stations:
-                north = station.latitude_minutes / 60 - latitude
-                east = (station.longitude_minutes / 60 - longitude) * 0.82
-                distance = 111 * math.hypot(north, east)
-                intensity = round(
-                    1.3 * magnitude
-                    - 2.2 * math.log10(distance + 10)
-                    - 0.5
-                    + rng.normal(scale=0.2),
-                    1,
-                )
-                if intensity >= 0.5:
-                    symbol = str(min(4, max(1, round(intensity))))
-                    records.append(
-                        bulletin.Record(station.number, symbol, intensity)
-                    )
-            time = datetime.datetime(year, month, 1, 12, 0)
-            quakes.append(
-                bulletin.Quake(
-                    id=f"{time:%Y%m%d%H%M}0000",
-                    origin_time=time,
-                    latitude=latitude,
-                    longitude=longitude,
-                    depth=10.0,
-                    magnitude=magnitude,
-                    records=tuple(records),
-                )
-            )
-    data, _ = dataset.build(stations, quakes)
-    return data
-
-
-def _table():
-    table = {
-        number: (1.0 + 0.05 * at, 1.2 + 0.03 * at)
-        for at, number in enumerate(_NUMBERS)
-    }
-    table[_ONE_ARV] = (1.1, None)
-    return table
 
 
 class _Directory(unittest.TestCase):
@@ -109,18 +38,18 @@ class _Directory(unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.revision = mock.patch.object(
-            compare_arv, "_revision", return_value=("a" * 40, True)
+            runs, "revision", return_value=("a" * 40, True)
         )
         self.revision.start()
         self.addCleanup(self.revision.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = pathlib.Path(temporary.name)
-        self.data = _dataset()
+        self.data = synthetic.grid_dataset()
         self.dataset_path = self.directory / "dataset.npz"
         self.data.save(self.dataset_path)
         self.arv_path = self.directory / "arv.csv"
-        arv.write_table(self.arv_path, _table())
+        arv.write_table(self.arv_path, synthetic.arv_table())
         self.out = self.directory / "out"
 
     def _run(self, cases=_TWO_CASES, max_rounds=_ROUNDS):
@@ -185,7 +114,7 @@ class RunTest(_Directory):
                 self.assertRegex(inputs["head"], "^[0-9a-f]{40}$")
                 self.assertIsInstance(inputs["dirty"], bool)
                 split = selection.splits(
-                    self.data, selection.rows(self.data, _table())
+                    self.data, selection.rows(self.data, synthetic.arv_table())
                 )[0]
                 self.assertEqual(record["train_rows"], split.train.sum())
                 self.assertEqual(record["test_rows"], split.test.sum())
@@ -198,11 +127,11 @@ class RunTest(_Directory):
 
     def test_run_saves_what_it_predicts(self):
         batch = 97
-        with mock.patch.object(compare_arv, "_PREDICTION_BATCH", batch):
+        with mock.patch.object(runs, "_PREDICTION_BATCH", batch):
             self._run(cases=("none",))
 
         directory = self.out / "none" / "year"
-        table = _table()
+        table = synthetic.arv_table()
         split = selection.splits(self.data, selection.rows(self.data, table))[0]
         rows = np.flatnonzero(split.test)
         quakes, stations = selection.candidates(
@@ -250,7 +179,7 @@ class RunTest(_Directory):
 
     def test_run_resumes(self):
         clean = mock.patch.object(
-            compare_arv, "_revision", return_value=("a" * 40, False)
+            runs, "revision", return_value=("a" * 40, False)
         )
         with clean, mock.patch.object(hurdle, "fit", wraps=hurdle.fit) as fit:
             self._run(cases=("cabinet_office",))
@@ -264,8 +193,8 @@ class RunTest(_Directory):
             self._run(cases=("cabinet_office",), max_rounds=_ROUNDS + 1)
             self.assertEqual(fit.call_count, 3)
 
-            table = _table()
-            table[_NUMBERS[0]] = (2.0, 2.0)
+            table = synthetic.arv_table()
+            table[synthetic.NUMBERS[0]] = (2.0, 2.0)
             arv.write_table(self.arv_path, table)
             self._run(cases=("cabinet_office",), max_rounds=_ROUNDS + 1)
             self.assertEqual(fit.call_count, 4)
@@ -338,7 +267,7 @@ class ReportTest(_Directory):
 
         results = self._report()["year"]
 
-        table = _table()
+        table = synthetic.arv_table()
         split = selection.splits(self.data, selection.rows(self.data, table))[0]
         held_out = self.data.station_held_out
         groups = {
@@ -435,13 +364,13 @@ class ReportTest(_Directory):
         self.assertEqual(after["held_out"]["max"], before["held_out"]["max"])
 
     def test_report_refuses_stale_predictions(self):
-        table = _table()
-        table[_NUMBERS[0]] = (2.0, 2.0)
+        table = synthetic.arv_table()
+        table[synthetic.NUMBERS[0]] = (2.0, 2.0)
         arv.write_table(self.arv_path, table)
         with self.assertRaisesRegex(ValueError, "arv"):
             self._report()
 
-        arv.write_table(self.arv_path, _table())
+        arv.write_table(self.arv_path, synthetic.arv_table())
         self._report()
         observed = self.data.observed.copy()
         observed[np.flatnonzero(~np.isnan(observed))[0]] += 0.1
@@ -485,7 +414,7 @@ class PartialReportTest(_Directory):
         self.assertTrue(held_out)
         table = {
             number: value
-            for number, value in _table().items()
+            for number, value in synthetic.arv_table().items()
             if number not in held_out
         }
         arv.write_table(self.arv_path, table)
